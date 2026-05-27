@@ -27,7 +27,7 @@ import httpx
 import numpy as np
 
 from bench.gpu_probe import GPUSnapshot, snapshot
-from bench.mfu import compute_mfu
+from bench.mfu import GEMMA_4_E2B_N_ACTIVE, compute_mbu, compute_mfu
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
@@ -54,6 +54,8 @@ class RequestRecord:
     e2e_latency_ms: float
     decode_tokens_per_sec: float
     status: int
+    accepted_tokens: int = 0
+    proposed_tokens: int = 0
     error: str | None = None
 
 
@@ -78,15 +80,15 @@ class GpuSampler(threading.Thread):
         super().__init__(daemon=True)
         self.interval_s = interval_s
         self.gpu_index = gpu_index
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self.peak: GPUSnapshot | None = None
         self.samples: list[GPUSnapshot] = []
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 s = snapshot(self.gpu_index)
                 self.samples.append(s)
@@ -94,7 +96,7 @@ class GpuSampler(threading.Thread):
                     self.peak = s
             except Exception as exc:
                 logger.warning("nvml sample failed: %s", exc)
-            self._stop.wait(self.interval_s)
+            self._stop_event.wait(self.interval_s)
 
 
 async def stream_one(
@@ -119,6 +121,8 @@ async def stream_one(
     ttft: float | None = None
     completion_tokens = 0
     prompt_tokens = 0
+    accepted_tokens = 0
+    proposed_tokens = 0
     last_tok_time = start
     decode_durations: list[float] = []
     status = 0
@@ -158,6 +162,9 @@ async def stream_one(
                 if usage:
                     prompt_tokens = int(usage.get("prompt_tokens", prompt_tokens))
                     completion_tokens = int(usage.get("completion_tokens", completion_tokens))
+                    spec = usage.get("speculative_decoding") or {}
+                    accepted_tokens = int(spec.get("accepted_tokens", accepted_tokens))
+                    proposed_tokens = int(spec.get("proposed_tokens", proposed_tokens))
     except Exception as exc:
         err = repr(exc)
         return RequestRecord(idx, prompt_tokens, completion_tokens, 0.0, 0.0, 0.0, status or 0, err)
@@ -172,6 +179,8 @@ async def stream_one(
         e2e_latency_ms=e2e * 1000.0,
         decode_tokens_per_sec=decode_tps,
         status=status,
+        accepted_tokens=accepted_tokens,
+        proposed_tokens=proposed_tokens,
         error=err,
     )
 
@@ -200,7 +209,13 @@ async def run_load(
     return records, wall_elapsed
 
 
-def aggregate(records: list[RequestRecord], wall_s: float, gpu_peak: GPUSnapshot, n_active_params: int) -> dict[str, Any]:
+def aggregate(
+    records: list[RequestRecord],
+    wall_s: float,
+    gpu_peak: GPUSnapshot,
+    n_active_params: int,
+    param_bytes: int,
+) -> dict[str, Any]:
     successes = [r for r in records if r.status == 200 and r.completion_tokens > 0]
     if not successes:
         return {"n_success": 0}
@@ -209,11 +224,32 @@ def aggregate(records: list[RequestRecord], wall_s: float, gpu_peak: GPUSnapshot
     decode_tps = np.array([r.decode_tokens_per_sec for r in successes])
     total_completion = sum(r.completion_tokens for r in successes)
     total_prompt = sum(r.prompt_tokens for r in successes)
+    total_accepted = sum(r.accepted_tokens for r in successes)
+    total_proposed = sum(r.proposed_tokens for r in successes)
+    overall_acceptance = (total_accepted / total_proposed) if total_proposed else 0.0
+    per_req_accept = np.array(
+        [r.accepted_tokens / r.proposed_tokens for r in successes if r.proposed_tokens]
+    )
     system_throughput = total_completion / wall_s if wall_s > 0 else 0.0
     mfu = compute_mfu(
         tokens_per_sec=system_throughput,
         peak_tflops=gpu_peak.peak_fp16_tflops,
         n_active_params=n_active_params,
+    )
+    # MBU uses TPOT (steady-state per-output-token latency).
+    # TPOT_ms = (e2e - TTFT) / (completion_tokens - 1), per-request, then mean.
+    tpot_per_req: list[float] = []
+    for r in successes:
+        if r.completion_tokens > 1 and r.e2e_latency_ms > r.ttft_ms:
+            tpot_per_req.append(
+                (r.e2e_latency_ms - r.ttft_ms) / 1000.0 / (r.completion_tokens - 1)
+            )
+    mean_tpot = float(np.mean(tpot_per_req)) if tpot_per_req else 0.0
+    mbu = compute_mbu(
+        tpot_seconds=mean_tpot,
+        peak_hbm_gbps=gpu_peak.peak_hbm_gbps,
+        param_bytes=param_bytes,
+        kv_cache_bytes=0,
     )
     return {
         "n_success": len(successes),
@@ -255,6 +291,27 @@ def aggregate(records: list[RequestRecord], wall_s: float, gpu_peak: GPUSnapshot
             "n_active_params": mfu.n_active_params,
             "formula": mfu.formula,
         },
+        "mbu": {
+            "achieved_gbps": mbu.achieved_gbps,
+            "peak_hbm_gbps": mbu.peak_gbps,
+            "mbu_fraction": mbu.mbu,
+            "bytes_per_token": mbu.bytes_per_token,
+            "tpot_seconds": mbu.tpot_seconds,
+            "param_bytes": param_bytes,
+            "formula": mbu.formula,
+        },
+        "speculative_decoding": {
+            "total_accepted_tokens": total_accepted,
+            "total_proposed_tokens": total_proposed,
+            "overall_acceptance_rate": overall_acceptance,
+            "per_request_acceptance_rate": {
+                "mean": float(per_req_accept.mean()) if per_req_accept.size else 0.0,
+                "p50": float(np.percentile(per_req_accept, 50)) if per_req_accept.size else 0.0,
+                "p90": float(np.percentile(per_req_accept, 90)) if per_req_accept.size else 0.0,
+                "min": float(per_req_accept.min()) if per_req_accept.size else 0.0,
+                "max": float(per_req_accept.max()) if per_req_accept.size else 0.0,
+            },
+        },
     }
 
 
@@ -275,6 +332,16 @@ def write_prometheus(out_dir: Path, agg: dict[str, Any], config: dict[str, Any])
         _emit("bench_mfu_fraction", agg["mfu"]["mfu_fraction"], "Model FLOP Utilization fraction")
         _emit("bench_achieved_tflops", agg["mfu"]["achieved_tflops"], "Achieved TFLOPS")
         _emit("bench_peak_tflops", agg["mfu"]["peak_tflops"], "Peak TFLOPS (FP16 tensor)")
+        spec = agg.get("speculative_decoding", {})
+        if spec:
+            _emit("bench_acceptance_rate_overall", spec["overall_acceptance_rate"], "Overall MTP acceptance rate")
+            _emit("bench_accepted_tokens_total", spec["total_accepted_tokens"], "Total accepted speculative tokens")
+            _emit("bench_proposed_tokens_total", spec["total_proposed_tokens"], "Total proposed speculative tokens")
+        mbu_block = agg.get("mbu", {})
+        if mbu_block:
+            _emit("bench_mbu_fraction", mbu_block["mbu_fraction"], "Memory Bandwidth Utilization fraction")
+            _emit("bench_achieved_hbm_gbps", mbu_block["achieved_gbps"], "Achieved HBM bandwidth (GB/s)")
+            _emit("bench_peak_hbm_gbps", mbu_block["peak_hbm_gbps"], "Peak HBM bandwidth (GB/s)")
     (out_dir / "metrics.prom").write_text("\n".join(lines) + "\n")
 
 
@@ -286,8 +353,19 @@ def main() -> int:
     p.add_argument("--requests", type=int, default=64)
     p.add_argument("--concurrency", type=int, default=8)
     p.add_argument("--max-tokens", type=int, default=256)
-    p.add_argument("--n-active-params", type=int, default=2_300_000_000,
-                   help="Effective compute params for E2B (excludes PLE lookups)")
+    p.add_argument(
+        "--n-active-params",
+        type=int,
+        default=GEMMA_4_E2B_N_ACTIVE,
+        help="Effective compute params for E2B (excludes PLE lookups)",
+    )
+    p.add_argument(
+        "--param-bytes",
+        type=int,
+        default=10_246_621_918,
+        help="Bytes streamed from HBM per decode step. Default = exact BF16 "
+        "size of google/gemma-4-E2B-it/model.safetensors (HF API).",
+    )
     p.add_argument("--label", default="run")
     p.add_argument("--metrics-dir", default=os.getenv("METRICS_DIR", "metrics/runs"))
     args = p.parse_args()
@@ -325,8 +403,9 @@ def main() -> int:
         "max_tokens": args.max_tokens,
         "label": args.label,
         "n_active_params": args.n_active_params,
+        "param_bytes": args.param_bytes,
     }
-    agg = aggregate(records, wall_s, gpu_peak, args.n_active_params)
+    agg = aggregate(records, wall_s, gpu_peak, args.n_active_params, args.param_bytes)
     result = RunResult(
         started_at=time.time() - wall_s,
         finished_at=time.time(),

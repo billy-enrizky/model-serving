@@ -30,6 +30,9 @@ class GPUSnapshot:
     sm_clock_mhz: int
     cuda_cores_per_sm: int
     peak_fp16_tflops: float
+    mem_bus_width_bits: int
+    mem_clock_mhz: int
+    peak_hbm_gbps: float
 
 
 # CUDA cores per SM and FP16 perf factor by compute capability.
@@ -46,6 +49,26 @@ _ARCH_TABLE = {
 }
 
 
+def _resolve_sm_count(handle, total_cuda_cores: int, cores_per_sm: int) -> int:
+    """Return the count of streaming multiprocessors.
+
+    nvmlDeviceGetNumGpuCores returns total CUDA cores (SMs * cores_per_sm),
+    not SM count. NVML only exposes the proper SM attribute on driver R535+.
+    Fall back to (total_cores / cores_per_sm) when the attribute is missing.
+    """
+    attr_name = "NVML_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT"
+    if hasattr(pynvml, attr_name):
+        try:
+            return int(
+                pynvml.nvmlDeviceGetAttribute(handle, getattr(pynvml, attr_name))
+            )
+        except Exception:
+            pass
+    if cores_per_sm > 0 and total_cuda_cores > 0:
+        return total_cuda_cores // cores_per_sm
+    return 0
+
+
 def snapshot(index: int = 0) -> GPUSnapshot:
     pynvml.nvmlInit()
     try:
@@ -54,29 +77,46 @@ def snapshot(index: int = 0) -> GPUSnapshot:
         if isinstance(name, bytes):
             name = name.decode()
         mem = pynvml.nvmlDeviceGetMemoryInfo(h)
-        sm_count = pynvml.nvmlDeviceGetNumGpuCores(h) if hasattr(
-            pynvml, "nvmlDeviceGetNumGpuCores"
-        ) else 0
-        try:
-            sm_count = pynvml.nvmlDeviceGetAttribute(
-                h, pynvml.NVML_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT
-            )
-        except Exception:
-            pass
-        try:
-            sm_clock = pynvml.nvmlDeviceGetMaxClockInfo(h, pynvml.NVML_CLOCK_SM)
-        except Exception:
-            sm_clock = pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_SM)
 
         try:
             major = pynvml.nvmlDeviceGetCudaComputeCapability(h)
             cc = (major[0], major[1])
         except Exception:
             cc = (7, 0)
-
         cores_per_sm, fp16_ops_per_cycle_per_sm = _ARCH_TABLE.get(cc, (64, 1024))
+
+        try:
+            total_cuda_cores = int(pynvml.nvmlDeviceGetNumGpuCores(h))
+        except Exception:
+            total_cuda_cores = 0
+        sm_count = _resolve_sm_count(h, total_cuda_cores, cores_per_sm)
+
+        try:
+            sm_clock = pynvml.nvmlDeviceGetMaxClockInfo(h, pynvml.NVML_CLOCK_SM)
+        except Exception:
+            sm_clock = pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_SM)
+
         peak_fp16_tflops = (
             sm_count * fp16_ops_per_cycle_per_sm * (sm_clock * 1e6) / 1e12
+        )
+
+        try:
+            mem_bus_width = int(pynvml.nvmlDeviceGetMemoryBusWidth(h))
+        except Exception:
+            mem_bus_width = 0
+        try:
+            mem_clock = int(pynvml.nvmlDeviceGetMaxClockInfo(h, pynvml.NVML_CLOCK_MEM))
+        except Exception:
+            try:
+                mem_clock = int(pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_MEM))
+            except Exception:
+                mem_clock = 0
+        # HBM2 effective rate = 2 transfers/cycle (DDR). Peak BW (bytes/sec) =
+        # bus_width_bits/8 * mem_clock_hz * 2. Reported as GB/s (decimal, /1e9).
+        peak_hbm_gbps = (
+            mem_bus_width / 8.0 * (mem_clock * 1e6) * 2.0 / 1e9
+            if mem_bus_width and mem_clock
+            else 0.0
         )
 
         return GPUSnapshot(
@@ -89,6 +129,9 @@ def snapshot(index: int = 0) -> GPUSnapshot:
             sm_clock_mhz=int(sm_clock),
             cuda_cores_per_sm=int(cores_per_sm),
             peak_fp16_tflops=float(peak_fp16_tflops),
+            mem_bus_width_bits=int(mem_bus_width),
+            mem_clock_mhz=int(mem_clock),
+            peak_hbm_gbps=float(peak_hbm_gbps),
         )
     finally:
         pynvml.nvmlShutdown()
