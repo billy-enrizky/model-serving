@@ -59,6 +59,7 @@ cd multi-token-prediction
 cp .env.example .env
 ./scripts/setup_secret.sh  # paste into .env as MODEL_API_KEY
 # fill HF_TOKEN from your HF account
+uv sync --extra bench
 ```
 
 ### Remote (<modal-runtime>)
