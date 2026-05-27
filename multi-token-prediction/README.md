@@ -22,6 +22,22 @@ forward-compatibility package allows the driver to load the binaries, but
 `transformers` is the supported path on this GPU and the path the Gemma 4
 model card publishes.
 
+## Minimum GPU
+
+**Floor**: any single CUDA GPU with **>= 12 GiB VRAM** and compute capability
+and the drafter occupies 0.1467 GiB; activations + KV cache for a 4096-token
+context need an additional ~1.5 GiB headroom. Below 12 GiB you must drop to
+8-bit weight quantization (`bitsandbytes` or `torchao`) or shorten
+`max_model_len`.
+
+| Tier | Example GPU | sm_ | VRAM | Stack |
+|------|-------------|-----|------|-------|
+| Recommended | A10 / L4 / RTX 4090 | sm_86 / sm_89 | 24 GiB | vLLM 0.21.0 + Gemma 4 MTP (`--speculative-config '{"method":"mtp",...}'`) |
+| Recommended | A100 40/80GB / H100 | sm_80 / sm_90 | 40-80 GiB | vLLM 0.21.0 with full MTP, batching, PagedAttention |
+| Minimum quantized | T4 16GB | sm_75 | 16 GiB | transformers + 8-bit quantization |
+
+torch >= 2.6 drop Pascal entirely.
+
 ## Architecture
 
 ```mermaid
@@ -55,8 +71,9 @@ graph LR
 | `google/gemma-4-E2B-it` | 5,123,178,051 | 10,246,621,918 B (9.5430 GiB) |
 | `google/gemma-4-E2B-it-assistant` (drafter) | 77,993,476 | 157,565,344 B (0.1467 GiB) |
 
-Effective compute params per forward pass: 2.3B (per Google Gemma 4 model
-card; PLE lookups inflate the total without contributing to per-token math).
+Effective compute params per forward pass: **1.91B** (Google's published
+"effective" E2B count; Per-Layer Embeddings inflate the total without
+contributing to per-token math because they are gathers, not matmuls).
 
 ## Hardware (verified)
 
@@ -82,6 +99,24 @@ cp .env.example .env
 uv sync --extra bench
 ```
 
+### One-time Modal bootstrap
+
+The deploy scripts use `modal-cli` non-interactively, so the private key must be
+loaded into `modal-cli-agent` (and on macOS, persisted in the Keychain) before
+any sync. Run this once per machine:
+
+```bash
+# Optionally set MODAL_PASSPHRASE so the script is fully non-interactive;
+# otherwise you'll be prompted exactly once for the passphrase.
+export MODAL_PASSPHRASE='your-passphrase'
+./scripts/setup_modal.sh
+```
+
+The script (a) starts `modal-cli-agent` if none is running, (b) loads
+`./.modal-cli/modal-token` (override with `MODAL_TOKEN_PATH`), and (c) on macOS adds
+`--apple-use-keychain` so future shells unlock the key automatically with
+no prompt.
+
 ### Remote (<modal-runtime>)
 
 ```bash
@@ -98,6 +133,29 @@ modal-cli <modal-user>@<modal-endpoint> 'cd ~/model-serving && nohup bash server
 modal-cli <modal-user>@<modal-endpoint> 'cd ~/model-serving && bash scripts/start_endpoint.sh'
 modal-cli <modal-user>@<modal-endpoint> 'cat ~/model-serving/logs/modal.url'
 ```
+
+### Where the public URL comes from
+
+`scripts/start_endpoint.sh` runs `modal-deploy endpoint --url
+http://127.0.0.1:8000`. Modal prints a freshly minted
+`https://<random>.modal.run` URL into the endpoint log, and the
+script greps that line and writes the URL to `logs/modal.url`. The
+sequence is:
+
+```bash
+# On <modal-runtime>, after the server is running:
+bash scripts/start_endpoint.sh                     # starts modal-deploy, captures URL
+cat logs/modal.url                              # -> https://coupon-con-pumps-eugene.modal.run
+
+# Anywhere with the API key:
+PUBLIC_URL=$(modal-cli <modal-user>@<modal-endpoint> 'cat ~/model-serving/logs/modal.url')
+curl "${PUBLIC_URL}/healthz"
+```
+
+The `<random>` slug is assigned by Modal on each `modal-deploy` start
+and changes if the endpoint restarts. For a stable hostname, log into a
+Modal account and use a named endpoint
+(`modal-deploy endpoint create ...`) instead of the ephemeral quick endpoint.
 
 Or via modal-app:
 
@@ -140,6 +198,23 @@ with `accepted_tokens`, `proposed_tokens`, and `acceptance_rate`.
   - `mtp_completion_tokens_total` counter
   - `mtp_vram_used_bytes{device="cuda:N"}` gauge
 - **Persistent benchmark output**: `metrics/runs/<timestamp>_<label>/result.json` and `metrics.prom`.
+
+
+Run label: `mtp_n4_c1_v3` (`metrics/runs/20260527T185044_mtp_n4_c1_v3/`).
+
+| Metric | Value | Source |
+|--------|-------|--------|
+| Throughput (tokens/sec, system) | 5.82 | measured (798 completion tokens / 137.12 s wall) |
+| Latency per request, p50 (ms) | 8463 | measured |
+| Latency per request, p99 (ms) | 9949 | measured |
+| Time to first token, p50 (ms) | 344.9 | measured |
+| Time to first token, p99 (ms) | 547.4 | measured |
+| Time per output token, mean (ms) | 171.0 | measured ((e2e - TTFT) / (n_tokens - 1)) |
+| Memory footprint, VRAM peak (GiB) | 10.365 | NVML poll during run |
+| Model FLOP Utilization (Kaplan 2N) | 0.0197% | achieved 0.0222 / peak 113.05 TFLOPS, N_active=1.91B |
+| Memory Bandwidth Utilization | 6.67% | achieved 59.92 / peak 898.05 GB/s, param_bytes=10.246 GB |
+| MTP acceptance rate, overall | 37.49% | 1136 accepted / 3030 proposed |
+| MTP acceptance rate, per-request p90 | 44.5% | measured |
 
 ## Benchmark
 
