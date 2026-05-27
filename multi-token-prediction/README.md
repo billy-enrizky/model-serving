@@ -22,21 +22,38 @@ forward-compatibility package allows the driver to load the binaries, but
 `transformers` is the supported path on this GPU and the path the Gemma 4
 model card publishes.
 
-## Minimum GPU
+## Minimum GPU to run vLLM 0.21.0 + Gemma 4 MTP
 
-**Floor**: any single CUDA GPU with **>= 12 GiB VRAM** and compute capability
-and the drafter occupies 0.1467 GiB; activations + KV cache for a 4096-token
-context need an additional ~1.5 GiB headroom. Below 12 GiB you must drop to
-8-bit weight quantization (`bitsandbytes` or `torchao`) or shorten
-`max_model_len`.
+vLLM 0.21.0 publishes only `+cu129` and `+cu130` wheels. Their bundled
+torch builds compile for `['sm_75', 'sm_80', 'sm_86', 'sm_89', 'sm_90',
+supported**: the wheels load but every kernel launch raises
+`no kernel image is available for execution on the device`. Driver
 
-| Tier | Example GPU | sm_ | VRAM | Stack |
-|------|-------------|-----|------|-------|
-| Recommended | A10 / L4 / RTX 4090 | sm_86 / sm_89 | 24 GiB | vLLM 0.21.0 + Gemma 4 MTP (`--speculative-config '{"method":"mtp",...}'`) |
-| Recommended | A100 40/80GB / H100 | sm_80 / sm_90 | 40-80 GiB | vLLM 0.21.0 with full MTP, batching, PagedAttention |
-| Minimum quantized | T4 16GB | sm_75 | 16 GiB | transformers + 8-bit quantization |
+**Floor for vLLM Gemma 4 MTP**: compute capability **>= 7.5 (Turing, T4)**
+and **>= 16 GiB VRAM** at BF16 with `max_model_len=4096`.
 
-torch >= 2.6 drop Pascal entirely.
+| Tier | Example GPU | sm_ | VRAM | vLLM 0.21.0 Gemma 4 MTP |
+|------|-------------|-----|------|-------------------------|
+| Minimum | T4 / RTX 2080 Ti | sm_75 | 16 / 11 GiB | Works at BF16 with `max_model_len <= 4096`; T4 is the cheapest cloud option |
+| Recommended | A10 / L4 | sm_86 / sm_89 | 24 GiB | Headroom for longer context and MTP draft cache |
+| Recommended | RTX 4090 | sm_89 | 24 GiB | Best single-card consumer option |
+| Production | A100 40/80GB | sm_80 | 40 / 80 GiB | Full MTP + batching + PagedAttention |
+| Production | H100 / H200 | sm_90 | 80 / 141 GiB | Highest acceptance throughput; MTP scales with batch |
+
+Driver requirement for the cu129/cu130 wheels: NVIDIA R535+ baseline,
+plus `cuda-compat-12-9` or `cuda-compat-13-0` if the system driver is
+older. See [NVIDIA forward-compatibility docs](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html).
+
+Launch flag (verified in vLLM PR #41745):
+
+```bash
+vllm serve google/gemma-4-E2B-it \
+  --speculative-config '{"method":"mtp","model":"google/gemma-4-E2B-it-assistant","num_speculative_tokens":2}' \
+  --dtype bfloat16 --max-model-len 4096
+```
+
+Pascal (sm_60) and earlier are excluded: PyTorch wheels for torch >= 2.6
+drop them entirely.
 
 ## Architecture
 
