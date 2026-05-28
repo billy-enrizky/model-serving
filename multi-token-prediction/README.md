@@ -241,12 +241,78 @@ Both runs use the same harness, same 8-prompt rotation, `temperature=0.0` (greed
 
 Baseline source: 1380 completion tokens / 146.32 s wall = 9.43 tok/s. MTP source: 798 completion tokens / 137.12 s wall = 5.82 tok/s. Peak FP16 = 113.05 TFLOPS (live NVML); peak HBM = 898.05 GB/s; `N_active = 1.91B`; `param_bytes = 10,246,621,918 B`; `kv_cache_bytes = 0` (lower bound).
 
-#### Interpretation
+#### Google's published Gemma 4 MTP speedups (gamma=4, batch=1)
+
+For context, the chart published by Google with the Gemma 4 MTP launch
+([blog post](https://blog.google/innovation-and-ai/technology/developers-tools/multi-token-prediction-gemma-4/),
+caption: "Token per second speed up (up to, depending on tasks, batch_size=1, gamma=4)";
+local copy: `docs/gemma4_mtp_chart.png`):
+
+| Variant | Hardware | Published speedup |
+|---------|----------|-------------------|
+| Gemma 4 E2B | Samsung S26 mobile GPU | up to 1.8x |
+| Gemma 4 E4B | Samsung S26 mobile GPU | up to 2.2x |
+| Gemma 4 E2B | Pixel TPU | up to 2.8x |
+| Gemma 4 E4B | Pixel TPU | up to 3.1x |
+| Gemma 4 31B | Apple M4 | up to 2.5x |
+| Gemma 4 26B | NVIDIA A100 | up to 1.5x |
+| Gemma 4 31B | NVIDIA A100 | up to 3.0x |
+
+Every entry is a net positive vs single-token decode. The lowest published
+single-density entry on a desktop NVIDIA GPU, and no entry below the A100
+tier. The "up to" caveat is load-bearing: per the caption, each number is
+the best speedup over the workload set Google evaluated, not a uniform
+floor.
+
+hardware tier in Google's chart and below the floor of vLLM 0.21.0 (which
+requires sm_75+, see "Minimum GPU" table above). It does not contradict
+Google's claims: it sits outside the tested envelope.
 
 
-For MTP to net-positive on this hardware, the acceptance rate would need to clear roughly `1 + drafter_cost/target_cost` per step. With `drafter_cost/target_cost ~ 78M/1.91B = 0.041` *under perfect parallelism*, but actually higher because the drafter runs autoregressively for N=4 steps while the target verifies in one step, the breakeven acceptance is well above what this drafter achieves on these prompts. See `local_docs/lessons.md` (decode at batch=1 is memory-bandwidth bound; MBU here goes from 10.97% baseline to 6.67% MTP, confirming the drafter is consuming HBM bandwidth with no compensating speedup).
+breakeven that Google's tested hardware clears:
 
-This finding is hardware/drafter specific: a sm_75+ host running vLLM 0.21.0 with the official `--speculative-config '{"method":"mtp",...}'` path and PagedAttention may invert the result. Cross-check tracked in `local_docs/todo.md`.
+   GB/s HBM = **124 FLOP/byte**
+   A100 SXM4 80GB is 312 TFLOPS over 2039 GB/s = **153 FLOP/byte**
+   ([A100 datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf)).
+   Decode at batch=1 is memory-bandwidth-bound (we measure 10.97% MBU and
+   only 0.03% MFU on baseline). MTP trades extra compute for fewer HBM
+   round-trips per accepted token; on a higher-FLOP/byte device that
+   A100 SXM4 80GB, and the absolute compute headroom is 2.8x lower, so
+   the same drafter cost consumes a larger fraction of the wall time
+   that the verify pass otherwise saves.
+
+2. **No PagedAttention, no batched verify.** This deployment runs the
+   "Why not vLLM?"). vLLM 0.21.0's MTP implementation
+   ([PR #41745](https://github.com/vllm-project/vllm/pull/41745))
+   was written and tested on A100/H100, with PagedAttention and a
+   batched verify scheduler. The transformers path
+   computes the verify pass without those amortizations, which on a
+   memory-bound GPU is exactly where the drafter cost lands.
+
+3. **Acceptance below breakeven on this prompt set.** At `temperature=0.0`
+   the Leviathan acceptance criterion reduces to "drafter argmax matches
+   target argmax" ([arXiv:2211.17192](https://arxiv.org/abs/2211.17192)
+   Algorithm 1; greedy reduction in Section 2.2). On our 8-prompt
+   above this number: each step pays for one drafter forward and one
+   target verify, and only buys back `acceptance * gamma` accepted
+   tokens. The fact that throughput drops to 0.62x means the drafter
+   forward + target verify cost more wall time than `0.375 * 4 = 1.5`
+
+#### What this finding does and does not claim
+
+transformers reference path, on this 8-prompt rotation, MTP is a 0.62x
+regression vs single-token decode.**
+
+It does not say: MTP is broken, the heuristic scheduler is wrong, or
+Google's chart is suspect. MTP is a net win on every hardware tier
+sitting outside the supported envelope.
+
+Open questions tracked in `local_docs/todo.md`: prompt-set sensitivity
+(does code-heavy or structured-output input clear the breakeven?),
+NUM_ASSISTANT_TOKENS sweep (does smaller gamma flip the sign?),
+nsys profile (where exactly does the drafter cost go?). Validation on a
+sm_75+ host with vLLM 0.21.0 is the apples-to-apples cross-check
+against Google's A100 1.5x figure.
 
 ## Benchmark
 
