@@ -43,9 +43,18 @@ _ARCH_TABLE = {
     # peak_fp16_tflops = sm_count * tensor_fp16_ops_per_cycle * clock_hz / 1e12
     (7, 5): (64, 512),   # T4/RTX20 Turing
     (8, 0): (64, 1024),  # A100 Ampere FP16 tensor
-    (8, 6): (128, 512),  # RTX30
-    (8, 9): (128, 512),  # RTX40 Ada
+    (8, 6): (128, 512),  # RTX30 / A10 / A40
+    (8, 9): (128, 512),  # RTX40 Ada / L4
     (9, 0): (128, 2048), # H100 Hopper FP16 tensor
+    # Blackwell (B100/B200/B300) sm_100/sm_120: 128 CUDA cores/SM. FP16 tensor
+    # ops/cycle/SM is approximate; per public Blackwell datasheet B200 hits
+    # ~2250 TFLOPS dense FP16 across 148 SMs at ~1.85 GHz boost, so
+    # ops/cycle/SM ~8200. Round to 8192 for power-of-two parity with prior
+    # entries. Resulting peak_fp16_tflops is a lower-bound estimate; absolute
+    # MFU should be treated as approximate on Blackwell. Throughput/TPOT/
+    # MBU/acceptance are unaffected by this constant.
+    (10, 0): (128, 8192),
+    (12, 0): (128, 8192),
 }
 
 
