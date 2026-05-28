@@ -178,11 +178,15 @@ class MTPEngine:
     ) -> dict[str, object]:
         do_sample = temperature is not None and temperature > 0.0
         kwargs: dict[str, object] = {
-            "assistant_model": self.assistant_model,
             "max_new_tokens": int(max_new_tokens),
             "do_sample": do_sample,
             "return_dict_in_generate": True,
         }
+        # NUM_ASSISTANT_TOKENS=0 disables MTP entirely (pure single-token decode baseline).
+        # Passing assistant_model with N=0 still triggers the heuristic scheduler in transformers
+        # and proposes >0 drafts on every step.
+        if int(self.assistant_model.generation_config.num_assistant_tokens) > 0:
+            kwargs["assistant_model"] = self.assistant_model
         if do_sample:
             kwargs["temperature"] = float(temperature)
             kwargs["top_p"] = float(top_p)
