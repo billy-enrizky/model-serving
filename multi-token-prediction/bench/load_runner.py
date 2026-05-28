@@ -138,6 +138,7 @@ async def stream_one(
     max_tokens: int,
     api_key: str,
     model: str,
+    auth_mode: str = "x-api-key",
 ) -> RequestRecord:
     payload = {
         "model": model,
@@ -147,7 +148,10 @@ async def stream_one(
         "temperature": 0.0,
         "stream_options": {"include_usage": True},
     }
-    headers = {"x-api-key": api_key, "content-type": "application/json"}
+    if auth_mode == "bearer":
+        headers = {"authorization": f"Bearer {api_key}", "content-type": "application/json"}
+    else:
+        headers = {"x-api-key": api_key, "content-type": "application/json"}
 
     start = time.perf_counter()
     ttft: float | None = None
@@ -225,6 +229,7 @@ async def run_load(
     concurrency: int,
     max_tokens: int,
     prompts: list[str],
+    auth_mode: str = "x-api-key",
 ) -> tuple[list[RequestRecord], float]:
     timeout = httpx.Timeout(connect=30.0, read=600.0, write=60.0, pool=30.0)
     limits = httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency)
@@ -234,7 +239,7 @@ async def run_load(
         async def task(i: int) -> RequestRecord:
             async with sem:
                 prompt = prompts[i % len(prompts)]
-                return await stream_one(client, i, prompt, max_tokens, api_key, model)
+                return await stream_one(client, i, prompt, max_tokens, api_key, model, auth_mode)
 
         wall_start = time.perf_counter()
         records = await asyncio.gather(*(task(i) for i in range(n_requests)))
@@ -407,6 +412,12 @@ def main() -> int:
         default="generic",
         help="Prompt rotation: generic (prose), code (code-heavy), structured (JSON/YAML/TOML).",
     )
+    p.add_argument(
+        "--auth-mode",
+        choices=["x-api-key", "bearer"],
+        default="x-api-key",
+        help="HTTP auth: x-api-key (transformers server) or bearer (vLLM --api-key).",
+    )
     args = p.parse_args()
 
     if not args.api_key:
@@ -428,6 +439,7 @@ def main() -> int:
             concurrency=args.concurrency,
             max_tokens=args.max_tokens,
             prompts=PROMPT_SETS[args.prompt_set],
+            auth_mode=args.auth_mode,
         ))
     finally:
         sampler.stop()
@@ -445,6 +457,7 @@ def main() -> int:
         "n_active_params": args.n_active_params,
         "param_bytes": args.param_bytes,
         "prompt_set": args.prompt_set,
+        "auth_mode": args.auth_mode,
     }
     agg = aggregate(records, wall_s, gpu_peak, args.n_active_params, args.param_bytes)
     result = RunResult(
