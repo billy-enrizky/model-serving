@@ -33,16 +33,48 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 
 
-PROMPTS = [
-    "Explain the concept of model FLOP utilization in transformer inference.",
-    "Write a Python function that performs binary search on a sorted list.",
-    "Summarize the key innovations of the original Transformer paper.",
-    "What are the trade-offs between Q4_K_M and Q5_K_M GGUF quantization?",
-    "Describe how speculative decoding accelerates LLM inference.",
-    "Compare and contrast vLLM PagedAttention with FlashAttention.",
-    "Outline a production deployment plan for a 7B parameter LLM on a single A100.",
-    "Walk through how RoPE positional embeddings differ from learned positions.",
-]
+PROMPT_SETS: dict[str, list[str]] = {
+    "generic": [
+        "Explain the concept of model FLOP utilization in transformer inference.",
+        "Write a Python function that performs binary search on a sorted list.",
+        "Summarize the key innovations of the original Transformer paper.",
+        "What are the trade-offs between Q4_K_M and Q5_K_M GGUF quantization?",
+        "Describe how speculative decoding accelerates LLM inference.",
+        "Compare and contrast vLLM PagedAttention with FlashAttention.",
+        "Outline a production deployment plan for a 7B parameter LLM on a single A100.",
+        "Walk through how RoPE positional embeddings differ from learned positions.",
+    ],
+    # Code-heavy prompts. Hypothesis: code output has higher token-level
+    # predictability (boilerplate, indentation, common identifiers), so
+    # drafter argmax should match target argmax more often than on prose.
+    # If acceptance climbs vs the generic set, MTP may flip net-positive.
+    "code": [
+        "Write a complete Python function `two_sum(nums, target)` returning indices of two numbers that add to target. Include docstring and a test in __main__.",
+        "Implement merge sort in Python. Provide the full function with a recursive merge and test on [3,1,4,1,5,9,2,6,5,3].",
+        "Write a Python function `is_balanced(s)` that returns True if parentheses, brackets, and braces are balanced. Include three test cases.",
+        "Write a Python class `LRUCache(capacity)` with `get(key)` and `put(key, value)` in O(1). Use OrderedDict and include a usage example.",
+        "Write a Python function `quicksort(arr)` with the Lomuto partition. Include a docstring with complexity analysis and a test on a 10-element list.",
+        "Implement Dijkstra's shortest path in Python using heapq. Function signature: `dijkstra(graph, start)`. Show usage on a 5-node weighted graph.",
+        "Write a Python function `flatten(lst)` that flattens an arbitrarily nested list. Include three test cases of varying depth.",
+        "Implement a binary tree in Python with `insert`, `inorder`, and `search` methods. Show insertion of [5,3,7,1,4,6,8] and an inorder traversal.",
+    ],
+    # Structured-output prompts. Hypothesis: JSON / template completion is
+    # the most predictable regime for a small drafter (delimiters, field
+    # names recur), so acceptance should be highest here.
+    "structured": [
+        "Return a JSON object with fields name (string), age (int), email (string), and a list of three hobbies (strings). Use the values: Alice, 30, alice@example.com, hobbies of your choice.",
+        "Return a JSON array of three book objects, each with title, author, year, and isbn. Pick well-known books.",
+        "Return a YAML document describing a Kubernetes Deployment for an nginx container with 3 replicas, named 'web', port 80.",
+        "Return a JSON object representing a HTTP 200 response with headers (Content-Type, Cache-Control, X-Request-ID) and a body field with a short JSON-encoded payload.",
+        "Return a JSON object describing a user record with id (uuid), created_at (ISO8601), profile (nested object with first_name, last_name, country), and roles (array of strings).",
+        "Return a JSON array of five GeoJSON Point features with random-looking but valid lat/lon coordinates and a 'name' property each.",
+        "Return a TOML config for a Rust crate with package name 'mytool', version 0.2.1, edition 2021, and three dependencies (serde, tokio, anyhow) with versions.",
+        "Return a JSON object that represents an OpenAPI 3.1 path entry for GET /users/{id} with a 200 response containing a User schema reference.",
+    ],
+}
+
+# Backwards-compat alias for any external import.
+PROMPTS = PROMPT_SETS["generic"]
 
 
 @dataclass
@@ -192,6 +224,7 @@ async def run_load(
     n_requests: int,
     concurrency: int,
     max_tokens: int,
+    prompts: list[str],
 ) -> tuple[list[RequestRecord], float]:
     timeout = httpx.Timeout(connect=30.0, read=600.0, write=60.0, pool=30.0)
     limits = httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency)
@@ -200,7 +233,7 @@ async def run_load(
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout, limits=limits, verify=False) as client:
         async def task(i: int) -> RequestRecord:
             async with sem:
-                prompt = PROMPTS[i % len(PROMPTS)]
+                prompt = prompts[i % len(prompts)]
                 return await stream_one(client, i, prompt, max_tokens, api_key, model)
 
         wall_start = time.perf_counter()
@@ -368,6 +401,12 @@ def main() -> int:
     )
     p.add_argument("--label", default="run")
     p.add_argument("--metrics-dir", default=os.getenv("METRICS_DIR", "metrics/runs"))
+    p.add_argument(
+        "--prompt-set",
+        choices=sorted(PROMPT_SETS.keys()),
+        default="generic",
+        help="Prompt rotation: generic (prose), code (code-heavy), structured (JSON/YAML/TOML).",
+    )
     args = p.parse_args()
 
     if not args.api_key:
@@ -388,6 +427,7 @@ def main() -> int:
             n_requests=args.requests,
             concurrency=args.concurrency,
             max_tokens=args.max_tokens,
+            prompts=PROMPT_SETS[args.prompt_set],
         ))
     finally:
         sampler.stop()
@@ -404,6 +444,7 @@ def main() -> int:
         "label": args.label,
         "n_active_params": args.n_active_params,
         "param_bytes": args.param_bytes,
+        "prompt_set": args.prompt_set,
     }
     agg = aggregate(records, wall_s, gpu_peak, args.n_active_params, args.param_bytes)
     result = RunResult(
