@@ -27,11 +27,16 @@ import modal
 # without editing this file. Defaults are H100 + N=4.
 GPU_TYPE = os.environ.get("MTP_GPU", "H100")
 NUM_ASSISTANT_TOKENS = os.environ.get("MTP_NUM_ASSISTANT", "4")
+MTP_SCHEDULE = os.environ.get("MTP_SCHEDULE", "heuristic")
 
 # Distinct app per GPU so deploys do not stomp on each other's container pool.
 # H100 keeps the legacy app name for URL stability; other GPUs get a suffix.
 _BASE_APP_NAME = "mtp-gemma-server"
 _APP_SUFFIX = "" if GPU_TYPE == "H100" else f"-{GPU_TYPE.lower().replace('-', '').replace('!', '').replace('+', 'plus')}"
+# When schedule != heuristic, use a separate app name so the warm pool
+# does not get reused with mismatched schedule env.
+if MTP_SCHEDULE == "constant":
+    _APP_SUFFIX = f"{_APP_SUFFIX}-const"
 APP_NAME = f"{_BASE_APP_NAME}{_APP_SUFFIX}"
 
 REPO_ROOT_LOCAL = "/Users/billy/Documents/model-serving/multi-token-prediction"
@@ -86,7 +91,7 @@ image = (
             "TARGET_MODEL": "google/gemma-4-E2B-it",
             "ASSISTANT_MODEL": "google/gemma-4-E2B-it-assistant",
             "NUM_ASSISTANT_TOKENS": NUM_ASSISTANT_TOKENS,
-            "NUM_ASSISTANT_TOKENS_SCHEDULE": "heuristic",
+            "NUM_ASSISTANT_TOKENS_SCHEDULE": MTP_SCHEDULE,
             "SERVED_MODEL_NAME": "gemma-4-E2B-it",
             # Cache on the mounted volume (persists across cold starts)
             "HF_HOME": HF_CACHE_DIR,
@@ -180,6 +185,7 @@ def bench_run(
     concurrency: int = 1,
     max_tokens: int = 128,
     prompt_set: str = "generic",
+    auth_mode: str = "x-api-key",
 ) -> dict:
     """Run bench/load_runner against an external base_url.
 
@@ -232,6 +238,7 @@ def bench_run(
                 concurrency=concurrency,
                 max_tokens=max_tokens,
                 prompts=PROMPT_SETS[prompt_set],
+                auth_mode=auth_mode,
             )
         )
     finally:
@@ -252,6 +259,7 @@ def bench_run(
         "n_active_params": n_active,
         "param_bytes": param_bytes,
         "prompt_set": prompt_set,
+        "auth_mode": auth_mode,
     }
     agg = aggregate(records, wall_s, gpu_peak, n_active, param_bytes)
 

@@ -27,8 +27,9 @@ GPU_LOWER="$(echo "$GPU" | tr '[:upper:]' '[:lower:]' | tr -d -- '-!+')"
 LOG_FILE="$STATE_DIR/deploy_${GPU_LOWER}.log"
 URL_FILE="$STATE_DIR/url_${GPU_LOWER}"
 
-echo "==> deploy gpu=$GPU NUM_ASSISTANT_TOKENS=$NUM"
-MTP_GPU="$GPU" MTP_NUM_ASSISTANT="$NUM" \
+SCHEDULE="${MTP_SCHEDULE:-heuristic}"
+echo "==> deploy gpu=$GPU NUM_ASSISTANT_TOKENS=$NUM SCHEDULE=$SCHEDULE"
+MTP_GPU="$GPU" MTP_NUM_ASSISTANT="$NUM" MTP_SCHEDULE="$SCHEDULE" \
   COLUMNS=200 \
   "$MODAL_BIN" deploy deploy/modal/modal_app.py 2>&1 | tee "$LOG_FILE"
 
