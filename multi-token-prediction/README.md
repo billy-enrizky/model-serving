@@ -16,6 +16,55 @@ documented heuristic schedule (`num_assistant_tokens=4`,
 `num_assistant_tokens_schedule="heuristic"`), and exposes the result behind
 an OpenAI-compatible HTTP API gated by an API key.
 
+## Why vLLM 0.21.0 specifically
+
+0.21.0 is the first vLLM release that ships **Gemma 4 MTP** (the
+speculative-decoding path used by this repo). The MTP integration
+landed in
+[PR #41745](https://github.com/vllm-project/vllm/pull/41745)
+("[Spec Decode] Add Gemma4 MTP speculative decoding support",
+merged 2026-05-06) and was first cut in v0.21.0 (released
+2026-05-15).
+
+Base Gemma 4 model support predates MTP. The original architecture
+PR is
+[#38826](https://github.com/vllm-project/vllm/pull/38826)
+("feat(models): implement Google Gemma 4 architecture support",
+merged 2026-04-02), first shipped in v0.20.0 (2026-04-27). So if
+you only need vanilla single-token Gemma 4 decode, v0.20.0+ works;
+the `--speculative-config '{"method":"mtp",...}'` path requires
+v0.21.0+.
+
+Note on DFlash (the other Gemma 4 speculative path in vLLM, not used
+by this repo). Verified against the upstream git history (`git tag
+--contains <sha>` on `vllm-project/vllm`):
+
+- DFlash was introduced in
+  [PR #36847](https://github.com/vllm-project/vllm/pull/36847)
+  ("[Feat][Spec Decode] DFlash", merged 2026-03-30). First contained
+  in **v0.20.0** (cut 2026-04-27).
+- The FP8 KV-cache fix
+  [PR #42692](https://github.com/vllm-project/vllm/pull/42692)
+  (commit `0fe7550`) merged 2026-05-15 14:29 UTC, **~10 hours after
+  v0.21.0 was tagged** (`ad7125a`, 2026-05-15 04:28 UTC). It is NOT
+  in v0.21.0; first release containing it is **v0.22.0rc1** (and
+  v0.22.0 when cut).
+- The lookahead-slot allocation fix
+  [PR #43733](https://github.com/vllm-project/vllm/pull/43733)
+  (merged 2026-05-27, well after v0.21.0) will also ship in v0.22.0.
+- Several Gemma4-specific DFlash fixes (KV-cache page-size alignment,
+  batched-verification rejected-slot masking) are still in flight as
+  of 2026-05-28
+  ([#40391](https://github.com/vllm-project/vllm/pull/40391),
+  [#41703](https://github.com/vllm-project/vllm/pull/41703)) and are
+  unmerged.
+
+If your workload uses Gemma 4 + DFlash + FP8 KV cache, v0.21.0 is not
+sufficient: track v0.22.0+. If your workload uses Gemma 4 + MTP at
+batch=1 (the path this repo benchmarks), v0.21.0 is the floor.
+
+Every reference to "vLLM" in the rest of this README means v0.21.0+.
+
 ## Why not vLLM?
 
 forward-compatibility package allows the driver to load the binaries, but
@@ -360,6 +409,101 @@ The cleanest cross-check against Google's A100 1.5x figure is to run
 the same workload on a sm_75+ host with vLLM 0.21.0 and the official
 `--speculative-config '{"method":"mtp",...}'` path. Tracked in
 `local_docs/todo.md`.
+
+### Measured numbers: Baseline vs MTP A/B on Modal H100 (16 requests, concurrency=1, max_tokens=128, NVIDIA H100 80GB HBM3)
+
+Same harness, same 8-prompt rotation, `temperature=0.0` (greedy), same
+hardware (H100 SXM, sm_90) and the runtime path (Modal serverless GPU,
+weights cached on a Modal Volume). `NUM_ASSISTANT_TOKENS=0` disables MTP
+entirely (engine omits `assistant_model=` from `target.generate(...)`),
+`=4` enables Gemma 4 MTP per the published heuristic schedule. Both runs
+were warmed before measurement so cold-start container init is not
+included in the wall clock.
+
+- Baseline: `metrics/runs/20260528T161654_baseline_n0_h100_c1_v1/`
+- MTP: `metrics/runs/20260528T162505_mtp_n4_h100_c1_v3/`
+- Deploy: `deploy/modal/modal_app.py` (1x H100, scale-to-zero, ASGI app)
+- Server VRAM peak (live `/metrics` `mtp_vram_used_bytes`): 9.717 GiB for
+  both; the drafter is resident in both runs.
+
+| Metric | Baseline (N=0) | MTP (N=4) | MTP vs Baseline |
+|--------|----------------|-----------|-----------------|
+| Throughput (tokens/sec, system) | 9.08 | 11.73 | 1.29x |
+| Total completion tokens (16 reqs) | 1386 | 777 | n/a |
+| Wall time (s) | 152.6 | 66.3 | n/a |
+| Latency per request, p50 (ms) | 9495 | 4209 | 2.26x faster |
+| Latency per request, p99 (ms) | 10036 | 4623 | 2.17x faster |
+| TTFT, p50 (ms) | 505.1 | 781.5 | 0.65x (MTP slower) |
+| TTFT, p99 (ms) | 782.1 | 916.7 | 0.85x (MTP slower) |
+| TPOT, mean (ms) | 107.3 | 71.8 | 1.49x faster |
+| Per-request decode TPS, mean | 9.54 | 14.15 | 1.48x |
+| VRAM peak (GiB, server-reported) | 9.717 | 9.717 | n/a |
+| MFU (Kaplan 2N) | 0.0065% | 0.0084% | 1.29x |
+| MBU (Databricks) | 2.85% | 4.26% | 1.49x |
+| MTP acceptance, overall | N/A (MTP off) | 38.55% | n/a |
+| MTP proposed / accepted | 0 / 0 | 2975 / 1147 | n/a |
+
+Headline: **MTP is a net win on H100, 1.29x system throughput and 2.26x
+lands inside the band Google published for A100 (1.5x at 26B). Acceptance
+drafter argmax/target argmax agreement is a model property, not a
+hardware property, so this is the expected behavior. The hardware change
+moved the bottom line, not the acceptance rate.
+
+What moved:
+- **TPOT** improves from 107.3 ms to 71.8 ms (1.49x). The verify pass
+- **Per-request decode TPS** improves from 9.54 to 14.15 (1.48x), which
+  is the steady-state speedup once TTFT is paid.
+- **MBU** rises from 2.85% to 4.26%; H100's 3352 GB/s HBM3 is
+  the achieved bandwidth in GB/s is much higher.
+
+What did not move (and why):
+- **TTFT** is 1.55x worse for MTP (505 ms vs 781 ms p50). MTP pays a
+  one-shot cost to issue the first drafter forward before any output
+  token is emitted; that cost is fixed-per-request and is the same on
+  dominated). On H100 the drafter forward stands out because the rest of
+  the pipeline got cheaper.
+- **VRAM peak** is identical because the drafter is loaded in both
+  configurations; only the call site of `assistant_model=` changes.
+
+Compute setup: peak FP16 = 535.27 TFLOPS (live NVML, `132 SMs * 2048
+ops/cycle * 1.98 GHz`); peak HBM = 3352.32 GB/s (live NVML, HBM3 5120-bit
+@ 2619 MHz, DDR x2); `N_active = 1.91B`; `param_bytes = 10,246,621,918 B`
+(BF16 `model.safetensors` of `google/gemma-4-E2B-it`, HF API);
+caveat). Both runs warmed with one short request before measurement to
+exclude container cold-start (a fresh H100 cold start is ~90 s in the
+first ungated bench run, dominated by `from_pretrained` + first CUDA
+graph compile).
+
+Reproduce:
+
+```bash
+# 1) Modal account bootstrap (idempotent: token, secrets, volume)
+bash deploy/modal/setup_modal.sh
+
+# 2) Pre-download weights into the persistent Modal volume
+bash deploy/modal/warm_weights.sh
+
+# 3a) Bench MTP (deploy with NUM_ASSISTANT_TOKENS=4 in modal_app.py)
+bash deploy/modal/deploy.sh
+bash deploy/modal/run_bench.sh mtp_n4_h100_c1   16 1 128
+
+# 3b) Bench baseline (set NUM_ASSISTANT_TOKENS=0, redeploy, then bench)
+sed -i.bak 's/"NUM_ASSISTANT_TOKENS": "4"/"NUM_ASSISTANT_TOKENS": "0"/' \
+  deploy/modal/modal_app.py
+bash deploy/modal/deploy.sh
+bash deploy/modal/run_bench.sh baseline_n0_h100_c1 16 1 128
+```
+
+
+|--------|---------------:|----------:|-----------:|---------------:|----------:|-----------:|
+| Throughput (tok/s) | 9.43 | 5.82 | 0.62x | 9.08 | 11.73 | 1.29x |
+| TPOT mean (ms) | 104.0 | 171.0 | 0.61x | 107.3 | 71.8 | 1.49x |
+| MBU | 10.97% | 6.67% | 0.61x | 2.85% | 4.26% | 1.49x |
+| Acceptance | n/a | 37.49% | n/a | n/a | 38.55% | n/a |
+
+The acceptance column is the same to within 1 pp across the two GPUs:
+this is the model behaving consistently. The throughput column flips
+sign, which is the hardware behaving differently.
 
 ## Benchmark
 
