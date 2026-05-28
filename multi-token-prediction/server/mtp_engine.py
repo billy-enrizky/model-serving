@@ -165,7 +165,12 @@ class MTPEngine:
             tokenize=False,
             add_generation_prompt=True,
         )
-        inputs = self.processor(text=text, return_tensors="pt").to(self.target_model.device)
+        inputs = self.processor(
+            text=text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=4096,
+        ).to(self.target_model.device)
         input_len = int(inputs["input_ids"].shape[-1])
         return inputs, input_len
 
