@@ -217,21 +217,36 @@ with `accepted_tokens`, `proposed_tokens`, and `acceptance_rate`.
 - **Persistent benchmark output**: `metrics/runs/<timestamp>_<label>/result.json` and `metrics.prom`.
 
 
-Run label: `mtp_n4_c1_v3` (`metrics/runs/20260527T185044_mtp_n4_c1_v3/`).
+Both runs use the same harness, same 8-prompt rotation, `temperature=0.0` (greedy), and same hardware. The only difference is `NUM_ASSISTANT_TOKENS`: `0` disables speculative decoding entirely (the engine omits `assistant_model=` from `target.generate(...)`); `4` enables Gemma 4 MTP per the published heuristic schedule.
 
-| Metric | Value | Source |
-|--------|-------|--------|
-| Throughput (tokens/sec, system) | 5.82 | measured (798 completion tokens / 137.12 s wall) |
-| Latency per request, p50 (ms) | 8463 | measured |
-| Latency per request, p99 (ms) | 9949 | measured |
-| Time to first token, p50 (ms) | 344.9 | measured |
-| Time to first token, p99 (ms) | 547.4 | measured |
-| Time per output token, mean (ms) | 171.0 | measured ((e2e - TTFT) / (n_tokens - 1)) |
-| Memory footprint, VRAM peak (GiB) | 10.365 | NVML poll during run |
-| Model FLOP Utilization (Kaplan 2N) | 0.0197% | achieved 0.0222 / peak 113.05 TFLOPS, N_active=1.91B |
-| Memory Bandwidth Utilization | 6.67% | achieved 59.92 / peak 898.05 GB/s, param_bytes=10.246 GB |
-| MTP acceptance rate, overall | 37.49% | 1136 accepted / 3030 proposed |
-| MTP acceptance rate, per-request p90 | 44.5% | measured |
+- Baseline: `metrics/runs/20260528T090353_baseline_n0_c1_v1/`
+- MTP: `metrics/runs/20260527T185044_mtp_n4_c1_v3/`
+
+| Metric | Baseline (N=0) | MTP (N=4) | MTP vs Baseline |
+|--------|----------------|-----------|-----------------|
+| Throughput (tokens/sec, system) | 9.43 | 5.82 | 0.62x |
+| Total completion tokens (16 reqs) | 1380 | 798 | n/a |
+| Wall time (s) | 146.3 | 137.1 | n/a |
+| Latency per request, p50 (ms) | 8783 | 8463 | 1.04x faster |
+| Latency per request, p99 (ms) | 11516 | 9949 | 1.16x faster |
+| TTFT, p50 (ms) | 349.0 | 344.9 | 1.01x faster |
+| TTFT, p99 (ms) | 586.9 | 547.4 | 1.07x faster |
+| TPOT, mean (ms) | 104.0 | 171.0 | 0.61x |
+| Per-request decode TPS, mean | 9.80 | 5.91 | 0.60x |
+| VRAM peak (GiB) | 10.301 | 10.365 | n/a |
+| MFU (Kaplan 2N) | 0.03% | 0.02% | 0.62x |
+| MBU (Databricks) | 10.97% | 6.67% | 0.61x |
+| MTP acceptance, overall | N/A (MTP off) | 37.49% | n/a |
+| MTP proposed / accepted | 0 / 0 | 3030 / 1136 | n/a |
+
+Baseline source: 1380 completion tokens / 146.32 s wall = 9.43 tok/s. MTP source: 798 completion tokens / 137.12 s wall = 5.82 tok/s. Peak FP16 = 113.05 TFLOPS (live NVML); peak HBM = 898.05 GB/s; `N_active = 1.91B`; `param_bytes = 10,246,621,918 B`; `kv_cache_bytes = 0` (lower bound).
+
+#### Interpretation
+
+
+For MTP to net-positive on this hardware, the acceptance rate would need to clear roughly `1 + drafter_cost/target_cost` per step. With `drafter_cost/target_cost ~ 78M/1.91B = 0.041` *under perfect parallelism*, but actually higher because the drafter runs autoregressively for N=4 steps while the target verifies in one step, the breakeven acceptance is well above what this drafter achieves on these prompts. See `local_docs/lessons.md` (decode at batch=1 is memory-bandwidth bound; MBU here goes from 10.97% baseline to 6.67% MTP, confirming the drafter is consuming HBM bandwidth with no compensating speedup).
+
+This finding is hardware/drafter specific: a sm_75+ host running vLLM 0.21.0 with the official `--speculative-config '{"method":"mtp",...}'` path and PagedAttention may invert the result. Cross-check tracked in `local_docs/todo.md`.
 
 ## Benchmark
 
