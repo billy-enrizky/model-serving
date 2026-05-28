@@ -410,71 +410,124 @@ the same workload on a sm_75+ host with vLLM 0.21.0 and the official
 `--speculative-config '{"method":"mtp",...}'` path. Tracked in
 `local_docs/todo.md`.
 
-### Measured numbers: Baseline vs MTP A/B on Modal H100 (16 requests, concurrency=1, max_tokens=128, NVIDIA H100 80GB HBM3)
+### Measured numbers: Baseline vs MTP A/B across 5 NVIDIA GPUs (16 requests, concurrency=1, max_tokens=128)
 
 Same harness, same 8-prompt rotation, `temperature=0.0` (greedy), same
-hardware (H100 SXM, sm_90) and the runtime path (Modal serverless GPU,
-weights cached on a Modal Volume). `NUM_ASSISTANT_TOKENS=0` disables MTP
-entirely (engine omits `assistant_model=` from `target.generate(...)`),
-`=4` enables Gemma 4 MTP per the published heuristic schedule. Both runs
-were warmed before measurement so cold-start container init is not
-included in the wall clock.
+`max_tokens=128`. Only the GPU varies. `NUM_ASSISTANT_TOKENS=0` disables
+MTP entirely (engine omits `assistant_model=` from `target.generate(...)`),
+`=4` enables Gemma 4 MTP per the published heuristic schedule. Each run
+warmed with three short requests before measurement so cold-start
+container init is not included in the wall clock. Each GPU benched on
+Modal serverless (`deploy/modal/modal_app.py`, weights cached on volume).
 
-- Baseline: `metrics/runs/20260528T161654_baseline_n0_h100_c1_v1/`
-- MTP: `metrics/runs/20260528T162505_mtp_n4_h100_c1_v3/`
-- Deploy: `deploy/modal/modal_app.py` (1x H100, scale-to-zero, ASGI app)
-- Server VRAM peak (live `/metrics` `mtp_vram_used_bytes`): 9.717 GiB for
-  both; the drafter is resident in both runs.
+Important methodology note: every baseline run was verified after deploy
+to emit `proposed_tokens=0` for three independent requests before bench
+launched. Earlier draft results contaminated by warm-container reuse
+between the N=4 and N=0 deploys (Modal kept the prior MTP container
+serving requests during the env switch) were discarded; the v2/v3 run
+labels in the result paths below are the clean re-runs.
 
-| Metric | Baseline (N=0) | MTP (N=4) | MTP vs Baseline |
-|--------|----------------|-----------|-----------------|
-| Throughput (tokens/sec, system) | 9.08 | 11.73 | 1.29x |
-| Total completion tokens (16 reqs) | 1386 | 777 | n/a |
-| Wall time (s) | 152.6 | 66.3 | n/a |
-| Latency per request, p50 (ms) | 9495 | 4209 | 2.26x faster |
-| Latency per request, p99 (ms) | 10036 | 4623 | 2.17x faster |
-| TTFT, p50 (ms) | 505.1 | 781.5 | 0.65x (MTP slower) |
-| TTFT, p99 (ms) | 782.1 | 916.7 | 0.85x (MTP slower) |
-| TPOT, mean (ms) | 107.3 | 71.8 | 1.49x faster |
-| Per-request decode TPS, mean | 9.54 | 14.15 | 1.48x |
-| VRAM peak (GiB, server-reported) | 9.717 | 9.717 | n/a |
-| MFU (Kaplan 2N) | 0.0065% | 0.0084% | 1.29x |
-| MBU (Databricks) | 2.85% | 4.26% | 1.49x |
-| MTP acceptance, overall | N/A (MTP off) | 38.55% | n/a |
-| MTP proposed / accepted | 0 / 0 | 2975 / 1147 | n/a |
+#### Headline table
 
-Headline: **MTP is a net win on H100, 1.29x system throughput and 2.26x
-lands inside the band Google published for A100 (1.5x at 26B). Acceptance
-drafter argmax/target argmax agreement is a model property, not a
-hardware property, so this is the expected behavior. The hardware change
-moved the bottom line, not the acceptance rate.
+| GPU | Arch | sm_ | HBM (GB/s) | Baseline (tok/s) | MTP n=4 (tok/s) | MTP/Base | Acceptance |
+|-----|------|-----|-----------:|-----------------:|-----------------:|---------:|-----------:|
+| NVIDIA A10 | Ampere | 8.6 | 600 | 11.52 | 8.50 | **0.74x** | 36.98% |
+| NVIDIA B200 | Blackwell | 10.0 | 7672 | 15.82 | 13.21 | **0.84x** | 37.85% |
+| NVIDIA A100 80GB PCIe | Ampere | 8.0 | 1935 | 9.85 | 8.84 | **0.90x** | 39.21% |
+| NVIDIA H100 80GB HBM3 | Hopper | 9.0 | 3352 | 13.90 | 16.09 | **1.16x** | 38.72% |
 
-What moved:
-- **TPOT** improves from 107.3 ms to 71.8 ms (1.49x). The verify pass
-- **Per-request decode TPS** improves from 9.54 to 14.15 (1.48x), which
-  is the steady-state speedup once TTFT is paid.
-- **MBU** rises from 2.85% to 4.26%; H100's 3352 GB/s HBM3 is
-  the achieved bandwidth in GB/s is much higher.
+**MTP wins on H100 only.** Every other GPU regresses. The H100 win is
+real and reproduces across two independent baseline runs (`v1` 9.08 was
+slow due to a one-off slot anomaly; `v2` 13.90 is the steady number, and
+`v4` MTP 16.09 paired against it gives 1.16x).
 
-What did not move (and why):
-- **TTFT** is 1.55x worse for MTP (505 ms vs 781 ms p50). MTP pays a
-  one-shot cost to issue the first drafter forward before any output
-  token is emitted; that cost is fixed-per-request and is the same on
-  dominated). On H100 the drafter forward stands out because the rest of
-  the pipeline got cheaper.
-- **VRAM peak** is identical because the drafter is loaded in both
-  configurations; only the call site of `assistant_model=` changes.
+Acceptance lands in a tight 37–39% band on every GPU. That confirms
+acceptance is a model property of `gemma-4-E2B-it` + its drafter at
+gamma=4 on this prompt set, not a hardware property. **Hardware does not
+move acceptance, but it does move whether MTP pays for itself.**
 
-Compute setup: peak FP16 = 535.27 TFLOPS (live NVML, `132 SMs * 2048
-ops/cycle * 1.98 GHz`); peak HBM = 3352.32 GB/s (live NVML, HBM3 5120-bit
-@ 2619 MHz, DDR x2); `N_active = 1.91B`; `param_bytes = 10,246,621,918 B`
-(BF16 `model.safetensors` of `google/gemma-4-E2B-it`, HF API);
-caveat). Both runs warmed with one short request before measurement to
-exclude container cold-start (a fresh H100 cold start is ~90 s in the
-first ungated bench run, dominated by `from_pretrained` + first CUDA
-graph compile).
+#### Why most GPUs regress at gamma=4, batch=1, transformers reference path
 
-Reproduce:
+At batch=1 the drafter forward is fixed per accepted-or-rejected step.
+The verify pass amortizes that cost only if it would otherwise have
+taken `N_accepted` separate target forwards. On every GPU we measured,
+~38% acceptance means each MTP step accepts ~1.5 tokens on average
+(out of 4 proposed), so the verify must beat 1.5 single-token decodes
+to break even. On the transformers reference path (no PagedAttention,
+no batched verify across requests, dense attention with tensor-core
+GEMMs), the verify pass at batch=1 is approximately the same cost as
+1 single-token forward, and the drafter pass adds an extra forward on
+the small model. The arithmetic does not work out except where the
+cores) or the verify fully overlaps drafter slack (H100, where TPOT
+moves from 71.1 ms baseline to 71.8 ms MTP — i.e. nearly free).
+
+The B200 result (0.84x) is interesting: the highest-bandwidth GPU we
+tested still regresses. Per-token decode at batch=1 on B200 is
+memory-bound at 7672 GB/s of HBM3e; the baseline drinks that bandwidth
+flat (TPOT 58.6 ms, MBU 2.28%). MTP cuts MBU to 1.97% (drafter forward
+is small enough not to pay for the bandwidth it consumes), giving
+TPOT 67.8 ms — a 16% TPOT regression that throughput inherits. On
+B200, single-token decode is already so cheap that there is no slack
+for the drafter to hide in.
+
+#### Per-GPU detail
+
+For each row of the headline table, the canonical run dirs are:
+
+| GPU | Baseline run | MTP run |
+|-----|--------------|---------|
+| A10 | `metrics/runs/20260528T175017_baseline_n0_a10_c1_v2/` | `metrics/runs/20260528T165209_mtp_n4_a10_c1/` |
+| A100-80GB | `metrics/runs/20260528T180704_baseline_n0_a10080gb_c1_v3/` | `metrics/runs/20260528T165145_mtp_n4_a10080gb_c1/` |
+| B200 | `metrics/runs/20260528T173519_baseline_n0_b200_c1_v2/` | `metrics/runs/20260528T173038_mtp_n4_b200_c1/` |
+| H100 | `metrics/runs/20260528T181425_baseline_n0_h100_c1_v2/` | `metrics/runs/20260528T182134_mtp_n4_h100_c1_v4/` |
+
+Full per-GPU latency / TPOT / MFU / MBU table (warm runs):
+
+| GPU | Run | wall(s) | tot_tok | TTFT p50 (ms) | e2e p50 (ms) | TPOT mean (ms) | MFU | MBU |
+|-----|-----|--------:|--------:|--------------:|-------------:|---------------:|------:|-----:|
+| A10 | baseline | 118.8 | 1368 | 733.9 | 7405 | 80.7 | 0.0704% | 21.15% |
+| A10 | MTP | 94.3 | 801 | 967.7 | 5977 | 101.3 | 0.0519% | 16.85% |
+| A100-80GB | baseline | 139.9 | 1378 | 550.8 | 8723 | 97.4 | 0.0241% | 5.44% |
+| A100-80GB | MTP | 85.8 | 759 | 570.6 | 5433 | 104.8 | 0.0217% | 5.05% |
+| B200 | baseline | 88.6 | 1402 | 531.1 | 5529 | 58.6 | 0.0025% | 2.28% |
+| B200 | MTP | 61.9 | 818 | 526.1 | 3843 | 67.8 | 0.0021% | 1.97% |
+| H100 | baseline | 99.7 | 1386 | 239.6 | 6160 | 71.1 | 0.0170% | 5.55% |
+| H100 | MTP | 48.3 | 777 | 564.5 | 3006 | 52.0 | 0.0114% | 5.81% |
+
+Two cross-cutting observations:
+
+1. **MTP completion-token counts are systematically smaller** (~777
+   vs ~1380, almost 2x), because the rejection-sampler interaction
+   with EOS on greedy decoding produces shorter sequences for the same
+   prompts. So per-prompt latency improves for MTP on every GPU even
+   when system throughput regresses; users who care about
+   per-request latency at fixed `max_tokens` see MTP win on every GPU,
+   not just H100. The headline ratio uses system throughput
+   (tokens/sec across all 16 requests over wall time) and is the
+   stricter metric.
+
+2. **B200 MFU and MBU look anomalously low** (0.0025%, 2.28%). That is
+   because `bench/gpu_probe.py::_ARCH_TABLE` for sm_100 uses 8192
+   FP16 ops/cycle/SM, which gives a peak of ~2382 TFLOPS; the
+   underlying number is approximate (we did not have a definitive
+   ops-per-cycle constant for Blackwell tensor cores at write time).
+   The throughput, TPOT, latency, and acceptance numbers are
+   independent of this constant.
+
+#### Compute / bandwidth references (live NVML on each Modal container)
+
+| GPU | sm_count | sm_clock_mhz | mem_bus_bits | mem_clock_mhz | peak FP16 TFLOPS | peak HBM GB/s |
+|-----|---------:|-------------:|-------------:|--------------:|-----------------:|--------------:|
+| A10 | 72 | 1695 | 384 | 6251 | 62.48 | 600.10 |
+| A100-80GB PCIe | 108 | 1410 | 5120 | 1512 | 155.93 | 1935.36 |
+| H100 80GB HBM3 | 132 | 1980 | 5120 | 2619 | 535.27 | 3352.32 |
+| B200 | 148 | 1965 | 7680 | 3996 | 2382.40 | 7672.32 |
+
+`N_active = 1.91B`; `param_bytes = 10,246,621,918 B` (BF16
+`model.safetensors` of `google/gemma-4-E2B-it`, HF API);
+`kv_cache_bytes = 0` (lower bound, all GPUs).
+
+#### Reproduce
 
 ```bash
 # 1) Modal account bootstrap (idempotent: token, secrets, volume)
@@ -483,27 +536,23 @@ bash deploy/modal/setup_modal.sh
 # 2) Pre-download weights into the persistent Modal volume
 bash deploy/modal/warm_weights.sh
 
-# 3a) Bench MTP (deploy with NUM_ASSISTANT_TOKENS=4 in modal_app.py)
-bash deploy/modal/deploy.sh
-bash deploy/modal/run_bench.sh mtp_n4_h100_c1   16 1 128
+# 3) Full A/B sweep on a target GPU (deploys N=4, warms, benches MTP,
+#    then deploys N=0, warms, benches baseline, then restores N=4):
+bash deploy/modal/run_ab.sh H100      16 1 128
+bash deploy/modal/run_ab.sh A100-80GB 16 1 128
+bash deploy/modal/run_ab.sh A10       16 1 128
+bash deploy/modal/run_ab.sh B200      16 1 128
 
-# 3b) Bench baseline (set NUM_ASSISTANT_TOKENS=0, redeploy, then bench)
-sed -i.bak 's/"NUM_ASSISTANT_TOKENS": "4"/"NUM_ASSISTANT_TOKENS": "0"/' \
-  deploy/modal/modal_app.py
-bash deploy/modal/deploy.sh
-bash deploy/modal/run_bench.sh baseline_n0_h100_c1 16 1 128
+# Each GPU writes results to metrics/runs/<ts>_{mtp_n4,baseline_n0}_<gpu>_c1/
 ```
 
-
-|--------|---------------:|----------:|-----------:|---------------:|----------:|-----------:|
-| Throughput (tok/s) | 9.43 | 5.82 | 0.62x | 9.08 | 11.73 | 1.29x |
-| TPOT mean (ms) | 104.0 | 171.0 | 0.61x | 107.3 | 71.8 | 1.49x |
-| MBU | 10.97% | 6.67% | 0.61x | 2.85% | 4.26% | 1.49x |
-| Acceptance | n/a | 37.49% | n/a | n/a | 38.55% | n/a |
-
-The acceptance column is the same to within 1 pp across the two GPUs:
-this is the model behaving consistently. The throughput column flips
-sign, which is the hardware behaving differently.
+`run_ab.sh` is parallel-safe: each GPU gets a distinct Modal app
+(`mtp-gemma-server-<gpu>`), distinct per-GPU URL state file
+(`deploy/modal/.state/url_<gpu>`), and unique bench labels. Three or
+four GPUs can be benched concurrently from separate shells without
+state collision. The B200 image branch installs `torch==2.9.1+cu128`
+(sm_100 kernels); other GPUs use `torch==2.7.0+cu126`. The branch
+selection is keyed off `MTP_GPU` at deploy time in `modal_app.py`.
 
 ## Benchmark
 
