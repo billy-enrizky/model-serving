@@ -307,12 +307,59 @@ It does not say: MTP is broken, the heuristic scheduler is wrong, or
 Google's chart is suspect. MTP is a net win on every hardware tier
 sitting outside the supported envelope.
 
-Open questions tracked in `local_docs/todo.md`: prompt-set sensitivity
-(does code-heavy or structured-output input clear the breakeven?),
-NUM_ASSISTANT_TOKENS sweep (does smaller gamma flip the sign?),
-nsys profile (where exactly does the drafter cost go?). Validation on a
-sm_75+ host with vLLM 0.21.0 is the apples-to-apples cross-check
-against Google's A100 1.5x figure.
+#### Closing the open questions (2026-05-28)
+
+`max_tokens=128`, c=1, 16 requests, identical hardware. Server
+restarted between every N. Acceptance and throughput are flat across
+N. The heuristic scheduler converges to the same proposed-token budget
+regardless of the initial value, so the regression is structural, not
+a tuning issue.
+
+| N | Throughput (tok/s) | TPOT mean (ms) | MBU | Acceptance | vs N=0 |
+|---|--------------------:|----------------:|------:|-----------:|-------:|
+| 0 | 9.43 | 104.0 | 10.97% | n/a | 1.00x |
+| 1 | 5.58 | 170.5 | 6.69% | 37.73% | 0.59x |
+| 2 | 5.76 | 171.1 | 6.67% | 37.59% | 0.61x |
+| 3 | 5.50 | 172.0 | 6.63% | 37.49% | 0.58x |
+| 4 | 5.82 | 171.0 | 6.67% | 37.49% | 0.62x |
+| 6 | 5.76 | 171.3 | 6.66% | 37.51% | 0.61x |
+| 8 | 5.46 | 174.3 | 6.55% | 37.25% | 0.58x |
+
+**2. Prompt-set sensitivity.** Replaced the 8 prose prompts with 8
+code-heavy prompts (leetcode-style, see `bench/load_runner.py:PROMPT_SETS`).
+Acceptance climbs from 37.49% to 43.88%, but throughput stays at the
+same regression band (5.35 vs 8.80 baseline = 0.61x). +6.4 pp of
+
+| Prompt set | N=0 (tok/s) | N=4 (tok/s) | Acceptance | Ratio |
+|------------|-------------:|-------------:|-----------:|------:|
+| generic | 9.43 | 5.82 | 37.49% | 0.62x |
+| code | 8.80 | 5.35 | 43.88% | 0.61x |
+
+**3. Profile (torch.profiler since `nsys` is not installed on this
+host).** Captured Chrome traces under
+`metrics/profile/mtp_n{0,4}_chrome_trace.json`. The dominant CUDA op
+in BOTH N=0 and N=4 is `aten::mm` at 89.7% of CUDA time, dispatched
+as `magma_sgemmEx_kernel<float, __nv_bfloat16, ...>` at 87.7% of CUDA
+through to MAGMA's float-accumulating GEMM, which is FP32-simulated,
+not the fast FP16 tensor path. The drafter inherits the same fallback,
+so MTP doubles the BF16-fallback cost without ever reaching the
+3:1+ throughput regime that BF16 tensor cores deliver on A100/H100.
+
+This explains why N has no effect: every additional drafter forward
+just adds more MAGMA-FP32-simulated GEMM time on top of the same
+MAGMA-FP32-simulated verify time, and acceptance > 0 only recovers a
+fixed fraction of the verify cost.
+
+**The headline.** Three factors compound:
+
+  A100 SXM4 80GB.
+  CUDA time spent in a MAGMA FP32-simulated path.
+- The transformers reference path has no PagedAttention or batched
+
+The cleanest cross-check against Google's A100 1.5x figure is to run
+the same workload on a sm_75+ host with vLLM 0.21.0 and the official
+`--speculative-config '{"method":"mtp",...}'` path. Tracked in
+`local_docs/todo.md`.
 
 ## Benchmark
 
