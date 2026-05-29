@@ -31,12 +31,16 @@ MAX_TOKENS="${4:-128}"
 echo "==> bench label=$LABEL gpu=$GPU requests=$REQUESTS concurrency=$CONCURRENCY max_tokens=$MAX_TOKENS"
 echo "==> against $URL"
 
+PROMPT_SET="${PROMPT_SET:-generic}"
+echo "==> prompt_set=$PROMPT_SET"
+
 MTP_GPU="$GPU" "$MODAL_BIN" run deploy/modal/modal_app.py::bench_run \
   --base-url "$URL" \
   --label "$LABEL" \
   --requests "$REQUESTS" \
   --concurrency "$CONCURRENCY" \
-  --max-tokens "$MAX_TOKENS"
+  --max-tokens "$MAX_TOKENS" \
+  --prompt-set "$PROMPT_SET"
 
 echo
 echo "==> pulling results from mtp-bench-results volume"

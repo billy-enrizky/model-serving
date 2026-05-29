@@ -4,7 +4,7 @@
 # Example: bash run_const.sh H100
 #
 # Writes a separate Modal app (mtp-gemma-server[-<gpu>]-const) so the
-# heuristic warm pool is untouched. Bench label: tx_mtp_const_<gpu>_c1.
+# heuristic warm pool is untouched. Bench label: transformers_mtp_const_<gpu>_c1.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -12,7 +12,10 @@ cd "$REPO_ROOT"
 
 GPU="${1:?usage: run_const.sh <GPU>}"
 GPU_LOWER="$(echo "$GPU" | tr '[:upper:]' '[:lower:]' | tr -d -- '-!+')"
-LABEL="tx_mtp_const_${GPU_LOWER}_c1"
+PROMPT_SET="${PROMPT_SET:-generic}"
+LABEL_SUFFIX=""
+[ "$PROMPT_SET" != "generic" ] && LABEL_SUFFIX="_${PROMPT_SET}"
+LABEL="transformers_mtp_const_${GPU_LOWER}${LABEL_SUFFIX}_c1"
 
 MODAL_BIN="$REPO_ROOT/.venv/bin/modal"
 KEY="${MODEL_API_KEY:-$(cat "$REPO_ROOT/deploy/modal/.state/api_key" 2>/dev/null || true)}"

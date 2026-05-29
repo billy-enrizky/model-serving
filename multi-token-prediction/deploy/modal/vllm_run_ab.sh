@@ -22,10 +22,13 @@ export MODEL_API_KEY="$KEY"
 REQ=16
 CON=1
 MAX=128
+PROMPT_SET="${PROMPT_SET:-generic}"
+LABEL_SUFFIX=""
+[ "$PROMPT_SET" != "generic" ] && LABEL_SUFFIX="_${PROMPT_SET}"
 
 run_mode() {
   local MODE="$1"
-  local LABEL="vllm_${MODE}_${GPU_LOWER}_c1"
+  local LABEL="vllm_${MODE}_${GPU_LOWER}${LABEL_SUFFIX}_c1"
   echo "[ab] ===== mode=${MODE} label=${LABEL} ====="
 
   # Stop prior app to flush warm pool (Modal warm-container quirk).
@@ -55,6 +58,7 @@ run_mode() {
     --requests "$REQ" \
     --concurrency "$CON" \
     --max-tokens "$MAX" \
+    --prompt-set "$PROMPT_SET" \
     --auth-mode bearer
 
   # Pull results from mtp-bench-results volume.
@@ -83,6 +87,8 @@ run_mode() {
   cd "$REPO_ROOT/deploy/modal"
 }
 
-run_mode mtp
-run_mode baseline
-echo "[ab] vLLM A/B on $MTP_GPU done."
+VLLM_MODES="${VLLM_MODES:-mtp baseline}"
+for MODE in $VLLM_MODES; do
+  run_mode "$MODE"
+done
+echo "[ab] vLLM A/B on $MTP_GPU done (modes=$VLLM_MODES)."

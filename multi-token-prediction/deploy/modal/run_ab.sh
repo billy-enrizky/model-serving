@@ -19,6 +19,12 @@ MAX="${4:-128}"
 GPU_LOWER="$(echo "$GPU" | tr '[:upper:]' '[:lower:]' | tr -d -- '-!+')"
 KEY="$(cat "$REPO_ROOT/deploy/modal/.state/api_key")"
 
+PROMPT_SET="${PROMPT_SET:-generic}"
+LABEL_SUFFIX=""
+[ "$PROMPT_SET" != "generic" ] && LABEL_SUFFIX="_${PROMPT_SET}"
+MODES="${MODES:-mtp baseline}"
+export PROMPT_SET
+
 warm() {
   local url="$1"
   echo "==> warming $url"
@@ -40,24 +46,36 @@ warm() {
   return 1
 }
 
-# 1) MTP N=4
-bash deploy/modal/deploy_gpu.sh "$GPU" 4
-URL="$(cat "$REPO_ROOT/deploy/modal/.state/url_${GPU_LOWER}")"
-warm "$URL"
-BENCH_URL="$URL" MTP_GPU="$GPU" \
-  bash deploy/modal/run_bench.sh "mtp_n4_${GPU_LOWER}_c${CON}" "$REQ" "$CON" "$MAX"
+run_one() {
+  local LABEL="$1"
+  local N="$2"
+  bash deploy/modal/deploy_gpu.sh "$GPU" "$N"
+  local URL
+  URL="$(cat "$REPO_ROOT/deploy/modal/.state/url_${GPU_LOWER}")"
+  warm "$URL"
+  BENCH_URL="$URL" MTP_GPU="$GPU" PROMPT_SET="$PROMPT_SET" \
+    bash deploy/modal/run_bench.sh "$LABEL" "$REQ" "$CON" "$MAX"
+}
 
-# 2) Baseline N=0
-bash deploy/modal/deploy_gpu.sh "$GPU" 0
-URL="$(cat "$REPO_ROOT/deploy/modal/.state/url_${GPU_LOWER}")"
-warm "$URL"
-BENCH_URL="$URL" MTP_GPU="$GPU" \
-  bash deploy/modal/run_bench.sh "baseline_n0_${GPU_LOWER}_c${CON}" "$REQ" "$CON" "$MAX"
+for MODE in $MODES; do
+  case "$MODE" in
+    mtp)      run_one "mtp_n4_${GPU_LOWER}${LABEL_SUFFIX}_c${CON}"      4 ;;
+    baseline) run_one "baseline_n0_${GPU_LOWER}${LABEL_SUFFIX}_c${CON}" 0 ;;
+    *) echo "Unknown MODE='$MODE' (expect mtp|baseline)" >&2; exit 1 ;;
+  esac
+done
 
-# 3) Restore N=4 deploy so the app stays in MTP-on state
-bash deploy/modal/deploy_gpu.sh "$GPU" 4
+# Restore N=4 deploy so the app stays in MTP-on state for next session,
+# but only if we touched the app (mtp or baseline).
+if [[ " $MODES " == *" baseline "* ]] || [[ " $MODES " == *" mtp "* ]]; then
+  bash deploy/modal/deploy_gpu.sh "$GPU" 4
+fi
 
 echo
-echo "==> A/B done for $GPU. Local results:"
-echo "    metrics/runs/<ts>_mtp_n4_${GPU_LOWER}_c${CON}"
-echo "    metrics/runs/<ts>_baseline_n0_${GPU_LOWER}_c${CON}"
+echo "==> A/B done for $GPU (modes=$MODES, prompt_set=$PROMPT_SET)."
+for MODE in $MODES; do
+  case "$MODE" in
+    mtp)      echo "    metrics/runs/<ts>_mtp_n4_${GPU_LOWER}${LABEL_SUFFIX}_c${CON}" ;;
+    baseline) echo "    metrics/runs/<ts>_baseline_n0_${GPU_LOWER}${LABEL_SUFFIX}_c${CON}" ;;
+  esac
+done
