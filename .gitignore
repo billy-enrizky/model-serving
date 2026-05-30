@@ -139,6 +139,22 @@ temp/
 **/deploy/modal/.state/
 .modal.toml
 
+# --- Terraform ---
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
 # --- Docker / infra ---
 *.tar
 *.gz
