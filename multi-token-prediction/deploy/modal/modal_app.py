@@ -30,9 +30,9 @@ NUM_ASSISTANT_TOKENS = os.environ.get("MTP_NUM_ASSISTANT", "4")
 MTP_SCHEDULE = os.environ.get("MTP_SCHEDULE", "heuristic")
 
 # Distinct app per GPU so deploys do not stomp on each other's container pool.
-# H100 keeps the legacy app name for URL stability; other GPUs get a suffix.
+# Every GPU gets a suffix (including H100) so warm pools are GPU-isolated.
 _BASE_APP_NAME = "mtp-gemma-server"
-_APP_SUFFIX = "" if GPU_TYPE == "H100" else f"-{GPU_TYPE.lower().replace('-', '').replace('!', '').replace('+', 'plus')}"
+_APP_SUFFIX = f"-{GPU_TYPE.lower().replace('-', '').replace('!', '').replace('+', 'plus')}"
 # When schedule != heuristic, use a separate app name so the warm pool
 # does not get reused with mismatched schedule env.
 if MTP_SCHEDULE == "constant":
