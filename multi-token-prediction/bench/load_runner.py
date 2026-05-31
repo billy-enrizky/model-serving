@@ -253,10 +253,18 @@ def aggregate(
     gpu_peak: GPUSnapshot,
     n_active_params: int,
     param_bytes: int,
+    concurrency: int = 1,
 ) -> dict[str, Any]:
     successes = [r for r in records if r.status == 200 and r.completion_tokens > 0]
     if not successes:
         return {"n_success": 0}
+    successes.sort(key=lambda r: r.idx)
+    # Cold cohort = first `concurrency` requests (all hit cold KV / CUDA-graph /
+    # spec-decode compile path on a freshly warmed container). Warm subset is
+    # everything after.
+    cold_cutoff = max(1, concurrency)
+    cold_records = [r for r in successes if r.idx < cold_cutoff]
+    warm_records = [r for r in successes if r.idx >= cold_cutoff]
     ttft = np.array([r.ttft_ms for r in successes])
     e2e = np.array([r.e2e_latency_ms for r in successes])
     decode_tps = np.array([r.decode_tokens_per_sec for r in successes])
@@ -289,6 +297,50 @@ def aggregate(
         param_bytes=param_bytes,
         kv_cache_bytes=0,
     )
+    # Warm-only metrics: same shape as full-cohort, but excluding the cold
+    # cohort (idx < concurrency). MTP, vLLM CUDA-graph capture, and KV-cache
+    # init pay a one-time cost on the first request per warmed container;
+    # warm-only numbers reflect steady-state throughput, while
+    # `system_throughput_tokens_per_sec` (full cohort) reflects what an
+    # end-user sees from a cold container.
+    warm_block: dict[str, Any] = {"n_warm": len(warm_records)}
+    if warm_records:
+        warm_e2e = np.array([r.e2e_latency_ms for r in warm_records])
+        warm_ttft = np.array([r.ttft_ms for r in warm_records])
+        warm_tps = np.array([r.decode_tokens_per_sec for r in warm_records])
+        warm_completion = sum(r.completion_tokens for r in warm_records)
+        warm_wall = sum(r.e2e_latency_ms for r in warm_records) / 1000.0 / max(1, concurrency)
+        warm_block.update({
+            "system_throughput_tokens_per_sec": (
+                warm_completion / warm_wall if warm_wall > 0 else 0.0
+            ),
+            "ttft_ms_mean": float(warm_ttft.mean()),
+            "ttft_ms_p50": float(np.percentile(warm_ttft, 50)),
+            "e2e_latency_ms_mean": float(warm_e2e.mean()),
+            "e2e_latency_ms_p50": float(np.percentile(warm_e2e, 50)),
+            "per_request_decode_tokens_per_sec_mean": float(warm_tps.mean()),
+            "per_request_decode_tokens_per_sec_p50": float(np.percentile(warm_tps, 50)),
+        })
+    cold_block: dict[str, Any] = {
+        "cold_cohort_size": len(cold_records),
+        "cold_cutoff_idx": cold_cutoff,
+    }
+    if cold_records and warm_records:
+        cold_e2e_mean = float(np.mean([r.e2e_latency_ms for r in cold_records]))
+        cold_ttft_mean = float(np.mean([r.ttft_ms for r in cold_records]))
+        warm_e2e_mean = warm_block["e2e_latency_ms_mean"]
+        warm_ttft_mean = warm_block["ttft_ms_mean"]
+        cold_block.update({
+            "cold_e2e_ms_mean": cold_e2e_mean,
+            "cold_ttft_ms_mean": cold_ttft_mean,
+            "warm_e2e_ms_mean": warm_e2e_mean,
+            "warm_ttft_ms_mean": warm_ttft_mean,
+            "setup_overhead_ms": cold_e2e_mean - warm_e2e_mean,
+            "setup_overhead_seconds": (cold_e2e_mean - warm_e2e_mean) / 1000.0,
+            "setup_overhead_pct_over_warm": (
+                (cold_e2e_mean / warm_e2e_mean - 1.0) * 100.0 if warm_e2e_mean > 0 else 0.0
+            ),
+        })
     return {
         "n_success": len(successes),
         "wall_seconds": wall_s,
@@ -350,6 +402,8 @@ def aggregate(
                 "max": float(per_req_accept.max()) if per_req_accept.size else 0.0,
             },
         },
+        "warm_only": warm_block,
+        "cold_start": cold_block,
     }
 
 
@@ -459,7 +513,14 @@ def main() -> int:
         "prompt_set": args.prompt_set,
         "auth_mode": args.auth_mode,
     }
-    agg = aggregate(records, wall_s, gpu_peak, args.n_active_params, args.param_bytes)
+    agg = aggregate(
+        records,
+        wall_s,
+        gpu_peak,
+        args.n_active_params,
+        args.param_bytes,
+        concurrency=args.concurrency,
+    )
     result = RunResult(
         started_at=time.time() - wall_s,
         finished_at=time.time(),
