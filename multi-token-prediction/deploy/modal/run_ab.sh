@@ -25,6 +25,11 @@ LABEL_SUFFIX=""
 MODES="${MODES:-mtp baseline}"
 export PROMPT_SET
 
+# MTP schedule: constant matches vLLM's fixed num_speculative_tokens for an
+# apples-to-apples comparison. Default to constant; override with
+# MTP_SCHEDULE=heuristic for the legacy heuristic-schedule sweep.
+export MTP_SCHEDULE="${MTP_SCHEDULE:-constant}"
+
 warm() {
   local url="$1"
   echo "==> warming $url"
@@ -49,6 +54,15 @@ warm() {
 run_one() {
   local LABEL="$1"
   local N="$2"
+  # Compute app name per modal_app.py logic so we stop the right app.
+  # Every GPU appends `-${GPU_LOWER}`. Schedule=constant adds `-const`.
+  local APP_SUFFIX="-${GPU_LOWER}"
+  [ "$MTP_SCHEDULE" = "constant" ] && APP_SUFFIX="${APP_SUFFIX}-const"
+  local APP_NAME="mtp-gemma-server${APP_SUFFIX}"
+  # Stop prior warm container before redeploying with new N.
+  # Without this, Modal serves the previous deploy's container (e.g. N=4)
+  # for the bench that should run N=0, contaminating baseline acceptance.
+  "$REPO_ROOT/.venv/bin/modal" app stop -y "$APP_NAME" 2>/dev/null || true
   bash deploy/modal/deploy_gpu.sh "$GPU" "$N"
   local URL
   URL="$(cat "$REPO_ROOT/deploy/modal/.state/url_${GPU_LOWER}")"
@@ -66,8 +80,12 @@ for MODE in $MODES; do
 done
 
 # Restore N=4 deploy so the app stays in MTP-on state for next session,
-# but only if we touched the app (mtp or baseline).
+# but only if we touched the app (mtp or baseline). Stop first to avoid
+# leaving the N=0 (baseline) container warm under the N=4 deploy.
 if [[ " $MODES " == *" baseline "* ]] || [[ " $MODES " == *" mtp "* ]]; then
+  RESTORE_SUFFIX="-${GPU_LOWER}"
+  [ "$MTP_SCHEDULE" = "constant" ] && RESTORE_SUFFIX="${RESTORE_SUFFIX}-const"
+  "$REPO_ROOT/.venv/bin/modal" app stop -y "mtp-gemma-server${RESTORE_SUFFIX}" 2>/dev/null || true
   bash deploy/modal/deploy_gpu.sh "$GPU" 4
 fi
 
