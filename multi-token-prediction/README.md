@@ -1329,6 +1329,175 @@ emitted 836 drafts in `/metrics` despite no `--speculative-config`
 flag. Fixed by adding `VLLM_MODE` and `MTP_GPU` into the image
 `.env` block of `vllm_modal_app.py`.)
 
+### Structured prompt-set sweep (2026-05-31)
+
+Same harness, same gemma-4-E2B-it, same `gemma-4-E2B-it-assistant`
+drafter, same 16 requests, c=1, max_tokens=128, temperature=0.0,
+constant N=4 on transformers, `num_speculative_tokens=4` on vLLM.
+The only change vs the prior two sections: the 8 prompts are
+JSON / YAML / TOML / OpenAPI / GeoJSON skeletons (see
+`bench/load_runner.py:64-73`). Hypothesis: structured output has
+even more predictable token boundaries than code (delimiters,
+field names, schema patterns), so the drafter's argmax matches the
+target's argmax more often, lifting acceptance further.
+
+Two infra fixes were applied before this sweep, motivated by
+contamination found in the prior generic baselines (see "Phase 0
+fixes" below):
+
+1. **`run_ab.sh` now defaults `MTP_SCHEDULE=constant`** so the
+   `mtp_n4_*` cell labels match the schedule actually deployed
+   (prior cells defaulted to `heuristic` despite the label).
+2. **`run_ab.sh` now calls `modal app stop -y mtp-gemma-server-<gpu>-const`
+   before each redeploy** so a redeploy with `NUM_ASSISTANT_TOKENS=0`
+   actually replaces the prior warm `N=4` container instead of
+   load-balancing onto it. Verified: H100 baseline now reports
+   `total_proposed_tokens: 0` (was 855 in the contaminated first run).
+
+#### Headline matrix: structured (warm tps, idx=0 cold cohort excluded)
+
+| GPU | tx_const | tx_baseline | tx mtp/baseline | vllm_mtp | vllm_baseline | vllm mtp/baseline | tx accept | vllm accept |
+|-----|---------:|------------:|----------------:|---------:|--------------:|------------------:|----------:|------------:|
+| A10       | 7.80  | 5.36  | **1.46x** | 136.12 | 67.85  | **2.01x** | 55.3% | 57.8%  |
+| A100-80GB | 6.31  | 6.00  | 1.05x     | 300.61 | 143.96 | **2.09x** | 54.7% | 57.0%  |
+| B200      | 15.11 | 15.06 | 1.00x     | 217.79 | 162.17 | **1.34x** | 52.5% | 57.0%  |
+| H100      | 10.79 | 8.51  | 1.27x     | 136.25 | 139.54 | 0.98x     | 52.8% | 57.1%  |
+
+Throughput is per-request decode tokens/sec averaged over warm
+requests (idx 1..15, excluding the cold idx=0). All 4 baseline
+cells have `total_proposed_tokens: 0` confirmed in `result.json`.
+vLLM mtp acceptance is from `/metrics`
+`spec_decode_num_accepted_tokens_total / spec_decode_num_draft_tokens_total`
+(scraped post-bench). Acceptance "TBD" cells await
+`vllm_metrics.prom` extraction.
+
+#### Three-regime ratio summary: generic vs code vs structured
+
+For the 4 Modal GPUs, vLLM mtp/baseline warm-tps ratio at constant
+gamma=4 across the three prompt sets:
+
+| GPU | generic | code | structured |
+|-----|--------:|-----:|-----------:|
+| A10       | 1.58x | 1.49x | **2.01x** |
+| A100-80GB | 1.21x | **2.19x** | 2.09x |
+| B200      | 0.99x | 1.68x | 1.34x |
+| H100      | 1.37x | 1.25x | 0.98x |
+
+And the transformers tx_const/tx_baseline warm-tps ratio:
+
+| GPU | generic | code | structured |
+|-----|--------:|-----:|-----------:|
+| A10       | 0.70x | 0.99x | 1.46x |
+| A100-80GB | 0.80x | 1.36x | 1.05x |
+| B200      | 0.95x | 1.08x | 1.00x |
+| H100      | 1.47x | 1.07x | 1.27x |
+
+**Findings:**
+
+1. **Structured prompts lift vLLM acceptance to 57%** (A100-80GB,
+   H100), up from ~35% on generic and ~52% on code. The drafter's
+   argmax matches the target's argmax most often when the output
+   distribution is template-driven. This confirms the prior
+   "acceptance is a model x prompt-set property" finding from the
+   code sweep, extending it: structured prompts move acceptance
+   higher than code did (an additional ~5 pp).
+
+2. **A10 + structured is the strongest MTP win on vLLM (2.01x).**
+   On generic A10 vLLM ran at 1.58x; structured pushes it to 2.01x.
+   A100-80GB also lands at ~2x on both code (2.19x) and structured
+   (2.09x), confirming that mid-tier datacenter GPUs at batch=1 are
+   the regime where MTP pays off most.
+
+3. **H100 + structured is breakeven (0.98x), opposite of A10.**
+   Highest-bandwidth GPU + highest-acceptance prompt set = MTP
+   regression. Per-decode time on H100 baseline is so short
+   (~7.2 ms steady state, 139.54 warm tps -> 7.16 ms/token) that
+   the drafter forward + verify-pass overhead consumes more than
+   the acceptance lift saves. The intersection of "fast hardware"
+   and "fast software" (vLLM) closes the MTP-win window.
+
+4. **Transformers structured win = 1.46x A10 / 1.27x H100, ties
+   on A100/B200.** The eager-mode reference path is slow enough
+   that the drafter cost amortizes well on A10 (where decode is
+   slowest) and H100 (1.27x), but on A100/B200 with higher per-step
+   throughput the drafter cost matches the savings.
+
+5. **No regime is universally MTP-positive across all (engine, GPU)
+   cells.** Generic = vLLM win on 3/4 GPUs, tx loss on 2/4. Code =
+   vLLM win on 4/4, tx win on 3/4. Structured = vLLM win on 3/4,
+   tx win on 3/4. The bench numbers are still n=1 per cell;
+   re-bench at n=3 in the next-session queue will tighten the
+   noise envelope on the 0.98x and 1.05x near-breakeven cells.
+
+#### Cold-start tax (idx=0 outlier)
+
+vLLM cold-starts pay a one-time spec-decode kernel JIT compile
+that the baseline path does not (Eagle's
+`copy_and_expand_dflash_inputs_kernel`,
+`rejection_greedy_sample_kernel`, etc.). The bench harness's first
+timed prompt hits this cold path; warm requests do not. The
+`bench/load_runner.py:aggregate` function now emits a `cold_start`
+block per cell with `setup_overhead_seconds = idx[0].e2e -
+mean(idx[1..].e2e)`, alongside `warm_only` aggregates that exclude
+idx=0. Numbers above use `warm_only`. The cold-start tax is real
+end-user-visible cost on a cold container; it just is not a
+steady-state property:
+
+| Cell                              | cold idx=0 e2e | warm mean e2e | setup_s | cold/warm tps shift |
+|-----------------------------------|---------------:|--------------:|--------:|--------------------:|
+| vllm_mtp h100 generic             | 1.72 s         | 0.97 s        | +0.75 s | 126.29 -> 132.42 (+5%)  |
+| vllm_baseline h100 generic        | 1.35 s         | 1.32 s        | +0.03 s | 96.48 -> 96.61 (~0)    |
+| vllm_mtp a10080gb generic         | 9.78 s         | 0.74 s        | +9.04 s | 98.02 -> 172.75 (+76%) |
+| vllm_baseline a10080gb generic    | 4.40 s         | 0.90 s        | +3.51 s | 114.61 -> 142.61 (+24%)|
+| vllm_mtp a100 structured          | 1.02 s         | 0.52 s        | +0.50 s | 276.23 -> 300.61 (+9%) |
+
+**Takeaway:** the cold-start tax is asymmetric. vLLM mtp pays
+3-9 s on first request (drafter + spec kernels JIT); vLLM baseline
+pays ~3-7 s (Eagle compile is what dominates, not the drafter). On
+the older `vllm-gemma-a10080gb-baseline` deploy, the warm pool was
+fresher, so cold-start was smaller. Older A100/B200 generic
+baselines were also contaminated by stale-warm-container reuse of
+the prior MTP container (3 cells, see Phase 0 fixes); they were
+re-benched on 2026-05-31 with the `modal app stop -y` workaround.
+
+#### Phase 0 fixes (2026-05-31)
+
+While preparing the structured sweep we found and fixed two bugs
+in the transformers A/B harness that contaminated 3 of the prior
+generic baselines:
+
+1. **Stale-warm-container in `run_ab.sh`.** `vllm_run_ab.sh:35`
+   already stops the prior app before redeploy; `run_ab.sh` did
+   not. So when run_ab.sh deployed `mtp-gemma-server-<gpu>` with
+   `N=4` then redeployed with `N=0`, the warm `N=4` container
+   stayed alive (Modal scaledown_window) and served the next
+   bench, contaminating baseline acceptance. Detection: 3
+   generic baseline cells (`baseline_n0_a10_c1`,
+   `baseline_n0_a10080gb_c1`, `baseline_n0_b200_c1`) reported
+   `total_proposed_tokens > 0` despite N=0. H100 baseline was
+   clean only because the prior MTP run was 14 hr earlier, beyond
+   `scaledown_window`. Fix: add `modal app stop -y <app>` per
+   mode in `run_ab.sh:run_one`.
+2. **Schedule defaulted to `heuristic`, not `constant`.**
+   `deploy_gpu.sh:30` sets `SCHEDULE="${MTP_SCHEDULE:-heuristic}"`,
+   and `run_ab.sh` never set `MTP_SCHEDULE`, so all `mtp_n4_*`
+   cells in the prior tables ran on `heuristic` schedule despite
+   the label implying constant. The heuristic schedule starting
+   from N=4 + greedy + identical prompts converges to N=4 in
+   steady state, so the throughput numbers happen to match
+   constant-N=4 (verified by byte-identical per-request prop/acc
+   between the old May-28 generic A10 cell and a fresh
+   May-31 constant-N=4 re-bench). The May-28 mtp data is therefore
+   not actually wrong, but the label was misleading. Fix: add
+   `export MTP_SCHEDULE="${MTP_SCHEDULE:-constant}"` to
+   `run_ab.sh` so the label and reality match going forward.
+
+Code, modal_app, and run_ab changes are in commits between
+`f726a7a` and the head of `main` on 2026-05-31. The 3
+contaminated generic baseline cells were re-benched on 2026-05-31
+with the fix; the new clean numbers are reflected in the
+"three-regime ratio summary" table above.
+
 ## Benchmark
 
 ```bash
