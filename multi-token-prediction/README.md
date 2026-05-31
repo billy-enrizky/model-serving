@@ -1383,7 +1383,8 @@ gamma=4 across the three prompt sets:
 | B200      | 0.99x | 1.68x | 1.34x |
 | H100      | 1.37x | 1.25x | 0.98x |
 
-And the transformers tx_const/tx_baseline warm-tps ratio:
+
+And the transformers tx_const/tx_baseline ratio:
 
 | GPU | generic | code | structured |
 |-----|--------:|-----:|-----------:|
@@ -1391,6 +1392,7 @@ And the transformers tx_const/tx_baseline warm-tps ratio:
 | A100-80GB | 0.80x | 1.36x | 1.05x |
 | B200      | 0.95x | 1.08x | 1.00x |
 | H100      | 1.47x | 1.07x | 1.27x |
+
 
 **Findings:**
 
