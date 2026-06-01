@@ -376,7 +376,7 @@ README use 1.91B for now and would shift down ~17% if recomputed at
 
 ## Hardware (verified)
 
-All five GPUs are accessed through Modal's GPU containers. Each
+All four GPUs are accessed through Modal's GPU containers. Each
 `"A100-80GB"`, `"B200"`, `"H100"`) and mounts a persistent volume
 for the Gemma weights so cold starts pull from volume, not HF.
 
@@ -626,7 +626,7 @@ the same workload on a sm_75+ host with vLLM 0.21.0 and the official
 `--speculative-config '{"method":"mtp",...}'` path. Tracked in
 `local_docs/todo.md`.
 
-### Measured numbers: Baseline vs MTP A/B across 5 NVIDIA GPUs (16 requests, concurrency=1, max_tokens=128)
+### Measured numbers: Baseline vs MTP A/B across 4 NVIDIA GPUs (16 requests, concurrency=1, max_tokens=128)
 
 Same harness, same 8-prompt rotation, `temperature=0.0` (greedy), same
 `max_tokens=128`. Only the GPU varies. `NUM_ASSISTANT_TOKENS=0` disables
@@ -1085,7 +1085,7 @@ suspect cells that the next-session queue will re-bench at n=3.
 1. **Acceptance lift confirmed engine-portable and hardware-portable.**
    Code prompts move acceptance from a tight 34.6-35.7% generic band
    to a tight 49.8-50.9% (transformers) / 52.3-52.8% (vLLM) code
-   band. ~15 pp lift on a 5-GPU x 2-engine matrix, every cell. This
+   band. ~15 pp lift on a 4-GPU x 2-engine matrix, every cell. This
    sharpens the prior finding ("acceptance is a model property, not a
    hardware property") to also be engine-near-invariant: vLLM and
    transformers land within ~2 pp of each other on the same prompt
@@ -1179,7 +1179,7 @@ flatten, binary_tree.
 Two readings, parallel to the generic table.
 
 Across **rows** (per-GPU mean): 50.0-51.0%, a 1.0 pp band over all
-five GPUs. Hardware-portable to within run-to-run noise, same finding
+four GPUs. Hardware-portable to within run-to-run noise, same finding
 as generic. **Acceptance is a model + prompt property, not a
 hardware property.**
 
@@ -1279,7 +1279,7 @@ to run a single arm. `vllm_run_ab.sh` accepts the same via
 `VLLM_MODES`.
 
 Modal note: free workspace caps web-functions at 8 deployed apps.
-Parallel A/B sweeps that fan out across 5 GPUs x 2 engines x 2 modes
+Parallel A/B sweeps that fan out across 4 GPUs x 2 engines x 2 modes
 will hit the cap. `modal app stop -y <name>` between cells frees a
 slot; the deploy scripts already do this for the apps they own. If
 the cap is hit mid-run, the agent should stop the prior app for
