@@ -1,7 +1,6 @@
 # --- Project-private docs and secrets ---
 local_docs
 .claude
-.modal-cli
 .env
 .env.*
 !.env.example
@@ -113,10 +112,7 @@ checkpoints/
 
 # --- Bench / experiment artifacts ---
 results/
-**/metrics/runs/
 **/metrics/profile/
-**/metrics/
-runs/
 wandb/
 mlruns/
 mlartifacts/

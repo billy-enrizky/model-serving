@@ -334,12 +334,15 @@ graph LR
 | Path | Role |
 |------|------|
 | `server/mtp_engine.py` | Loads target + drafter, calls `generate(assistant_model=...)` per the Gemma 4 reference. Exposes `generate()` and `stream_generate()`. Tracks accept/propose counters. |
-| `server/api.py` | OpenAI-compatible FastAPI service: `/v1/chat/completions` (stream + non-stream), `/v1/models`, `/healthz`, `/metrics`. `X-API-Key` auth. |
+| `server/api.py` | OpenAI-compatible FastAPI service: `/v1/chat/completions` (stream + non-stream), `/v1/models`, `/healthz`, `/metrics`. `X-API-Key` and Bearer auth. |
 | `bench/load_runner.py` | Concurrent SSE benchmark; persists JSON + Prometheus per run. Captures acceptance rate. |
 | `bench/gpu_probe.py` | Live VRAM and peak FP16 TFLOPS via NVML. |
 | `bench/mfu.py` | Exact MFU = `2 * N_active * tokens/sec / peak_TFLOPS`. |
-| `scripts/start_endpoint.sh` | Ephemeral Modal quick endpoint; captures public URL. |
-| `deploy/modal-app/*.modal-app` | modal-app units for `mtp-server` and `modal-deploy-endpoint`. |
+| `deploy/modal/modal_app.py` | Modal app: GPU container, ASGI mount, persistent volume for weights. Transformers MTP engine. |
+| `deploy/modal/vllm_modal_app.py` | Modal app: vLLM v0.21.0 serving stack with `num_speculative_tokens` env propagation. |
+| `deploy/modal/run_ab.sh` | One-shot A/B sweep: deploys MTP, warms, benches, redeploys baseline, benches, restores MTP. |
+| `deploy/modal/run_const.sh` | Same flow with `MTP_SCHEDULE=constant`, `N=4` for apples-to-apples vLLM parity. |
+| `deploy/modal/vllm_run_ab.sh` | vLLM A/B: `num_speculative_tokens=4` vs no-spec-config baseline. |
 
 ## Models (verified against HF API)
 
@@ -373,91 +376,78 @@ README use 1.91B for now and would shift down ~17% if recomputed at
 
 ## Hardware (verified)
 
-`<modal-runtime>` (`<modal-endpoint>`):
+All five GPUs are accessed through Modal's GPU containers. Each
+`"A100-80GB"`, `"B200"`, `"H100"`) and mounts a persistent volume
+for the Gemma weights so cold starts pull from volume, not HF.
 
-- VRAM: 16,384 MiB total
-- CPU: 40 cores
-- RAM: 31 GiB total
-- OS: Ubuntu 22.04.2 LTS
+| GPU | Arch | sm_ | HBM (GB/s) | VRAM (GiB) |
+|-----|------|----:|-----------:|-----------:|
+| A10 | Ampere | 86 | 600 | 24 |
+| A100-80GB | Ampere | 80 | 1935 | 80 |
+| H100-80GB | Hopper | 90 | 3350 | 80 |
+| B200-180GB | Blackwell | 100 | 8000 | 180 |
 
-package `cuda-compat-13-0` is extracted to `~/cuda-compat/` and added to
-`LD_LIBRARY_PATH` for binaries that link against newer CUDA stubs.
+pinned to `vllm/vllm-openai:v0.21.0`. Both built into the Modal app
+spec (`deploy/modal/modal_app.py`, `deploy/modal/vllm_modal_app.py`).
 
 ## Quickstart
 
-### Local
+### Local prep
 
 ```bash
 cd multi-token-prediction
 cp .env.example .env
-./scripts/setup_secret.sh   # paste into MODEL_API_KEY
-# fill HF_TOKEN
+# fill HF_TOKEN, MODEL_API_KEY (any opaque string)
 uv sync --extra bench
 ```
 
-### One-time Modal bootstrap
-
-The deploy scripts use `modal-cli` non-interactively, so the private key must be
-loaded into `modal-cli-agent` (and on macOS, persisted in the Keychain) before
-any sync. Run this once per machine:
+### Modal account bootstrap (one time)
 
 ```bash
-# Optionally set MODAL_PASSPHRASE so the script is fully non-interactive;
-# otherwise you'll be prompted exactly once for the passphrase.
-export MODAL_PASSPHRASE='your-passphrase'
-./scripts/setup_modal.sh
+# Idempotent: token, secrets, and persistent volume for weights.
+bash deploy/modal/setup_modal.sh
 ```
 
-The script (a) starts `modal-cli-agent` if none is running, (b) loads
-`./.modal-cli/modal-token` (override with `MODAL_TOKEN_PATH`), and (c) on macOS adds
-`--apple-use-keychain` so future shells unlock the key automatically with
-no prompt.
+This sets up the Modal CLI auth, registers the `model-api-key` and
+`hf-token` secrets, and creates the `gemma-models` persistent volume.
 
-### Remote (<modal-runtime>)
+### Pre-download weights into the Modal volume (one time per model)
 
 ```bash
-./scripts/deploy.sh
-modal-cli <modal-user>@<modal-endpoint> 'cd ~/model-serving && bash scripts/setup_modal.sh'
-modal-cli <modal-user>@<modal-endpoint> 'cd ~/model-serving && bash scripts/install_modal-deploy.sh'
-modal-cli <modal-user>@<modal-endpoint> 'cd ~/model-serving && bash scripts/warm_weights.sh'
+bash deploy/modal/warm_weights.sh
 ```
 
-Boot stack manually:
+Pulls `google/gemma-4-E2B-it` (target) and
+`google/gemma-4-E2B-it-assistant` (drafter) into `gemma-models` so
+cold starts no longer pay HF download time.
+
+### Run the full A/B sweep on a target GPU
 
 ```bash
-modal-cli <modal-user>@<modal-endpoint> 'cd ~/model-serving && nohup bash server/launch_server.sh > logs/server.log 2>&1 &'
-modal-cli <modal-user>@<modal-endpoint> 'cd ~/model-serving && bash scripts/start_endpoint.sh'
-modal-cli <modal-user>@<modal-endpoint> 'cat ~/model-serving/logs/modal.url'
+# Transformers MTP A/B (default heuristic schedule):
+GPU=h100 bash deploy/modal/run_ab.sh
+
+# Transformers MTP, schedule=constant, N=4 (apples-to-apples vLLM parity):
+GPU=h100 bash deploy/modal/run_const.sh
+
+# vLLM A/B (num_speculative_tokens=4 vs no-spec-config baseline):
+GPU=h100 bash deploy/modal/vllm_run_ab.sh
 ```
 
-### Where the public URL comes from
+script deploys the MTP variant, warms the container, runs
+`bench/load_runner.py`, redeploys the baseline variant, benches that,
+then restores the MTP variant. Results land in
+`metrics/runs/<ts>_{tx_mtp,tx_mtp_const,vllm_mtp,baseline_n0}_<gpu>_<prompt-set>_c<concurrency>/`.
 
-`scripts/start_endpoint.sh` runs `modal-deploy endpoint --url
-http://127.0.0.1:8000`. Modal prints a freshly minted
-`https://<random>.modal.run` URL into the endpoint log, and the
-script greps that line and writes the URL to `logs/modal.url`. The
-sequence is:
+### Smoke test a single deployment
 
 ```bash
-# On <modal-runtime>, after the server is running:
-bash scripts/start_endpoint.sh                     # starts modal-deploy, captures URL
-cat logs/modal.url                              # -> https://coupon-con-pumps-eugene.modal.run
-
-# Anywhere with the API key:
-PUBLIC_URL=$(modal-cli <modal-user>@<modal-endpoint> 'cat ~/model-serving/logs/modal.url')
-curl "${PUBLIC_URL}/healthz"
+GPU=h100 bash deploy/modal/smoke_test.sh        # transformers MTP
+GPU=h100 bash deploy/modal/vllm_smoke_test.sh   # vLLM stack
 ```
 
-The `<random>` slug is assigned by Modal on each `modal-deploy` start
-and changes if the endpoint restarts. For a stable hostname, log into a
-Modal account and use a named endpoint
-(`modal-deploy endpoint create ...`) instead of the ephemeral quick endpoint.
-
-Or via modal-app:
-
-```bash
-modal-cli <modal-user>@<modal-endpoint> 'cd ~/model-serving && sudo bash deploy/install_modal.sh'
-```
+The script deploys the app, prints the Modal HTTPS URL, hits
+`/healthz`, and tears the deployment down.
 
 ## API
 
@@ -1273,7 +1263,6 @@ for GPU in H100 A100-80GB A10 B200; do
   PROMPT_SET=code MODES=baseline bash deploy/modal/run_ab.sh "$GPU"
 done
 
-# Restore .env schedule=heuristic and N=4 afterward.
 
 # vLLM A/B (mtp + baseline) on code (Modal)
 for GPU in H100 A100-80GB A10 B200; do
@@ -1304,7 +1293,6 @@ bash deploy/modal/run_const.sh H100
 bash deploy/modal/run_const.sh A100-80GB
 bash deploy/modal/run_const.sh A10
 bash deploy/modal/run_const.sh B200
-#  and run scripts/restart_bench.sh)
 
 # vLLM A/B per GPU. App name = vllm-gemma-<gpu>-<mode>; URL state file
 # = .state/url_vllm_<gpu>_<mode>; bench labels = vllm_<mode>_<gpu>_c1.
@@ -1518,16 +1506,14 @@ with the fix; the new clean numbers are reflected in the
 A per-cell audit covering every directory in `metrics/runs/` was
 written to `local_docs/cell_audit.json`. For every transformers MTP
 cell the audit reconstructs the schedule actually deployed (via the
-Modal app URL `-const-`/`-cons-` infix for Modal cells, and via
+Modal app URL `-const-`/`-cons-` infix) and compares it to the
 column the README cites the cell under. Findings:
 
-- 4/5 GPUs in the constant column (A10, A100-80GB, B200, H100) cite
-  cells whose Modal app URL contains `-const-`/`-cons-`, proving
+  cite cells whose Modal app URL contains `-const-`/`-cons-`, proving
   `MTP_SCHEDULE=constant` was set at deploy time.
-  `heuristic` at bench time. These were re-benched on 2026-05-31
-  with `.env` flipped to `constant` (cells
-  The headline matrix, code-vs-generic table, and three-regime
-  ratio table above all now cite the `_v2` cells.
+  `MTP_SCHEDULE=constant` set on the Modal app spec, producing
+  code-vs-generic table, and three-regime ratio table all now cite
+  the `_v2` cells.
 - Per-request acceptance is byte-identical between the heuristic
   `_c1` cells and the constant `_c1_v2` re-benches, confirming the
   "heuristic converges to N=4 on greedy + identical prompts" lesson

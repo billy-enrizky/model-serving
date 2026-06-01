@@ -439,7 +439,7 @@ def write_prometheus(out_dir: Path, agg: dict[str, Any], config: dict[str, Any])
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--base-url", required=True, help="e.g. http://127.0.0.1:8443 or https://xxx.modal.run")
+    p.add_argument("--base-url", required=True, help="e.g. https://<workspace>--<app>.modal.run")
     p.add_argument("--api-key", default=os.getenv("MODEL_API_KEY"))
     p.add_argument("--model", default="gemma-4-E2B-it")
     p.add_argument("--requests", type=int, default=64)
