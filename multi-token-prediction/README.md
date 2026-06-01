@@ -1395,10 +1395,17 @@ And the transformers tx_const/tx_baseline ratio:
 | A10       | 0.70x | 0.99x | 1.46x |
 | A100-80GB | 0.80x | 1.36x | 1.05x |
 | B200      | 0.95x | 1.08x | 1.00x |
-| H100      | 1.47x | 1.07x | 1.27x |
+| H100      | 0.96x | 1.05x | 1.27x |
 
-prior May-29 cells predated the warm/cold split AND were deployed
-tps for both legs. All other rows use warm-only tps.
+All ratios are computed with drop-idx=0 ("warm") tokens / drop-idx=0
+2026-05-31 `_v2` constant re-bench
+deployed with `.env` schedule=heuristic. A10 + A100-80GB + B200
+generic rows divide constant `_c1` mtp by the 2026-05-31 re-bench
+generic baseline (`baseline_n0_{a10,a10080gb,b200}_c1`), since the
+May-28 generic baselines were contaminated by the stale-warm-container
+bug (see "Phase 0 fixes"). H100 generic uses
+`baseline_n0_h100_c1_v2`; the v1 cell is a slot-anomaly outlier
+flagged at the heuristic headline table footnote and was not used.
 
 **Findings:**
 
