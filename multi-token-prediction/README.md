@@ -1007,7 +1007,11 @@ generic prose prompts for 8 code-heavy prompts (leetcode-style:
 two_sum, merge_sort, is_balanced, LRUCache, quicksort, Dijkstra,
 flatten, binary_tree). See `bench/load_runner.py:PROMPT_SETS`.
 
-50.7%); restored to heuristic after the runs.
+(5.71 tok/s, 50.7%, `_v2` re-bench); restored to heuristic after the
+runs. Per-request acceptance is byte-identical between the original
+heuristic-deployed cells and the constant `_v2` re-benches (greedy +
+identical prompts: heuristic schedule converges to N=4 in steady
+state). See `local_docs/cell_audit.json`.
 
 #### Headline matrix: code vs generic, both engines
 
@@ -1393,6 +1397,8 @@ And the transformers tx_const/tx_baseline ratio:
 | B200      | 0.95x | 1.08x | 1.00x |
 | H100      | 1.47x | 1.07x | 1.27x |
 
+prior May-29 cells predated the warm/cold split AND were deployed
+tps for both legs. All other rows use warm-only tps.
 
 **Findings:**
 
@@ -1499,6 +1505,32 @@ Code, modal_app, and run_ab changes are in commits between
 contaminated generic baseline cells were re-benched on 2026-05-31
 with the fix; the new clean numbers are reflected in the
 "three-regime ratio summary" table above.
+
+#### Audit pass (2026-05-31)
+
+A per-cell audit covering every directory in `metrics/runs/` was
+written to `local_docs/cell_audit.json`. For every transformers MTP
+cell the audit reconstructs the schedule actually deployed (via the
+Modal app URL `-const-`/`-cons-` infix for Modal cells, and via
+column the README cites the cell under. Findings:
+
+- 4/5 GPUs in the constant column (A10, A100-80GB, B200, H100) cite
+  cells whose Modal app URL contains `-const-`/`-cons-`, proving
+  `MTP_SCHEDULE=constant` was set at deploy time.
+  `heuristic` at bench time. These were re-benched on 2026-05-31
+  with `.env` flipped to `constant` (cells
+  The headline matrix, code-vs-generic table, and three-regime
+  ratio table above all now cite the `_v2` cells.
+- Per-request acceptance is byte-identical between the heuristic
+  `_c1` cells and the constant `_c1_v2` re-benches, confirming the
+  "heuristic converges to N=4 on greedy + identical prompts" lesson
+- 5 May-28 cells under the `transformers_mtp_heur` column (line
+  837 headline) deployed heuristic schedule, which is what that
+  column is meant to cite, so labels and deployment match.
+- 3 May-28 generic baselines (`baseline_n0_{a10,a10080gb,b200}_c1`)
+  are contaminated (`prop>0` despite `N=0`) but are not cited in
+  any README table; the headline tables cite the `_v2`/`_v3`
+  re-benches, which are clean.
 
 ## Benchmark
 
