@@ -7,10 +7,10 @@ self-contained Modal app, A/B sweep scripts, and result artifacts.
 ## Methods
 
 - [`multi-token-prediction/`](multi-token-prediction/) , Gemma 4 E2B-it +
-  drafter, transformers MTP engine and vLLM v0.21.0
-  B200, H100; three prompt regimes (generic, code, structured). Headline
-  result: MTP/baseline ratio is **regime-dependent**: it depends on
-  `(engine, GPU, prompt-set)`.
+  drafter, transformers MTP engine and vLLM v0.21.0 across four NVIDIA GPUs
+  (A10, A100-80GB, H100, B200); three prompt regimes (generic, code,
+  structured). Headline result: MTP/baseline ratio is **regime-dependent**:
+  it depends on `(engine, GPU, prompt-set)`.
 
 Future methods (e.g. `dflash/`) follow the same shape: subdir +
 Modal app + A/B + measured artifacts.
@@ -42,7 +42,7 @@ README documents which cells back which numbers.
   table traces back to a `metrics/runs/<ts>_<label>/result.json` file
   that this repo ships.
 - A reference implementation of speculative decoding A/B comparisons
-  across two engines and five GPU classes.
+  across two engines and four GPU classes.
 
 ## What this repo is not
 
