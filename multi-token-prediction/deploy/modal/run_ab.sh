@@ -25,6 +25,10 @@ LABEL_SUFFIX=""
 MODES="${MODES:-mtp baseline}"
 export PROMPT_SET
 
+# RUN_TAG lets an n=3 wrapper append _r1/_r2/_r3 so repeated runs of the same
+# cell land in distinct metrics/runs dirs instead of overwriting by label.
+RUN_TAG="${RUN_TAG:-}"
+
 # MTP schedule: constant matches vLLM's fixed num_speculative_tokens for an
 # apples-to-apples comparison. Default to constant; override with
 # MTP_SCHEDULE=heuristic for the legacy heuristic-schedule sweep.
@@ -73,8 +77,8 @@ run_one() {
 
 for MODE in $MODES; do
   case "$MODE" in
-    mtp)      run_one "mtp_n4_${GPU_LOWER}${LABEL_SUFFIX}_c${CON}"      4 ;;
-    baseline) run_one "baseline_n0_${GPU_LOWER}${LABEL_SUFFIX}_c${CON}" 0 ;;
+    mtp)      run_one "mtp_n4_${GPU_LOWER}${LABEL_SUFFIX}_c${CON}${RUN_TAG}"      4 ;;
+    baseline) run_one "baseline_n0_${GPU_LOWER}${LABEL_SUFFIX}_c${CON}${RUN_TAG}" 0 ;;
     *) echo "Unknown MODE='$MODE' (expect mtp|baseline)" >&2; exit 1 ;;
   esac
 done
@@ -93,7 +97,7 @@ echo
 echo "==> A/B done for $GPU (modes=$MODES, prompt_set=$PROMPT_SET)."
 for MODE in $MODES; do
   case "$MODE" in
-    mtp)      echo "    metrics/runs/<ts>_mtp_n4_${GPU_LOWER}${LABEL_SUFFIX}_c${CON}" ;;
-    baseline) echo "    metrics/runs/<ts>_baseline_n0_${GPU_LOWER}${LABEL_SUFFIX}_c${CON}" ;;
+    mtp)      echo "    metrics/runs/<ts>_mtp_n4_${GPU_LOWER}${LABEL_SUFFIX}_c${CON}${RUN_TAG}" ;;
+    baseline) echo "    metrics/runs/<ts>_baseline_n0_${GPU_LOWER}${LABEL_SUFFIX}_c${CON}${RUN_TAG}" ;;
   esac
 done

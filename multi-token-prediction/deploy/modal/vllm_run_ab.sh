@@ -26,13 +26,22 @@ PROMPT_SET="${PROMPT_SET:-generic}"
 LABEL_SUFFIX=""
 [ "$PROMPT_SET" != "generic" ] && LABEL_SUFFIX="_${PROMPT_SET}"
 
+# RUN_TAG lets an n=3 wrapper append _r1/_r2/_r3 so repeated runs of the same
+# cell land in distinct metrics/runs dirs instead of overwriting by label.
+RUN_TAG="${RUN_TAG:-}"
+
 run_mode() {
   local MODE="$1"
-  local LABEL="vllm_${MODE}_${GPU_LOWER}${LABEL_SUFFIX}_c1"
+  local LABEL="vllm_${MODE}_${GPU_LOWER}${LABEL_SUFFIX}_c1${RUN_TAG}"
   echo "[ab] ===== mode=${MODE} label=${LABEL} ====="
 
   # Stop prior app to flush warm pool (Modal warm-container quirk).
   "$MODAL_BIN" app stop -y "vllm-gemma-${GPU_LOWER}-${MODE}" 2>/dev/null || true
+  # Stop the sibling mode's app too: mtp and baseline are DIFFERENT app names,
+  # so leaving the other one deployed eats a Web-Function slot toward the
+  # free-workspace 8-app cap (the bug that failed baseline in the n=3 smoke).
+  SIBLING="mtp"; [ "$MODE" = "mtp" ] && SIBLING="baseline"
+  "$MODAL_BIN" app stop -y "vllm-gemma-${GPU_LOWER}-${SIBLING}" 2>/dev/null || true
 
   VLLM_MODE="$MODE" bash vllm_deploy_gpu.sh
   local URL

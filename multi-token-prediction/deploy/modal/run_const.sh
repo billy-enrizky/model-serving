@@ -15,7 +15,10 @@ GPU_LOWER="$(echo "$GPU" | tr '[:upper:]' '[:lower:]' | tr -d -- '-!+')"
 PROMPT_SET="${PROMPT_SET:-generic}"
 LABEL_SUFFIX=""
 [ "$PROMPT_SET" != "generic" ] && LABEL_SUFFIX="_${PROMPT_SET}"
-LABEL="transformers_mtp_const_${GPU_LOWER}${LABEL_SUFFIX}_c1"
+# RUN_TAG lets an n=3 wrapper append _r1/_r2/_r3 so repeated runs of the same
+# cell land in distinct metrics/runs dirs instead of overwriting by label.
+RUN_TAG="${RUN_TAG:-}"
+LABEL="transformers_mtp_const_${GPU_LOWER}${LABEL_SUFFIX}_c1${RUN_TAG}"
 
 MODAL_BIN="$REPO_ROOT/.venv/bin/modal"
 KEY="${MODEL_API_KEY:-$(cat "$REPO_ROOT/deploy/modal/.state/api_key" 2>/dev/null || true)}"
