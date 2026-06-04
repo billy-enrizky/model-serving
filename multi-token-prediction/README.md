@@ -1,14 +1,14 @@
 # multi-token-prediction
 
-Production deployment of **Gemma 4 E2B-it Multi-Token Prediction (MTP)**
+Benchmark study of **Gemma 4 E2B-it Multi-Token Prediction (MTP)** at batch=1,
 using the official Google reference path: Hugging Face `transformers` with
 the `assistant_model=` kwarg, mirroring the model card and Google MTP docs
-exactly.
+exactly, compared against vLLM 0.21.0 spec-decode on the same GPUs.
 
 > The drafter proposes N tokens generated autoregressively; the target
 > model verifies all N tokens in **one** forward pass; drafted tokens with
 > high probabilities are accepted, low probabilities are rejected.
-> -- [ai.google.dev/gemma/docs/mtp/mtp](https://ai.google.dev/gemma/docs/mtp/mtp)
+> Source: [ai.google.dev/gemma/docs/mtp/mtp](https://ai.google.dev/gemma/docs/mtp/mtp)
 
 The implementation does not reinvent the speculative-decoding loop. It calls
 `target_model.generate(..., assistant_model=assistant_model, ...)` with the
@@ -35,7 +35,7 @@ Modal across four NVIDIA GPUs (A10, A100-80GB, H100, B200).
 - [Hardware (verified)](#hardware-verified)
 - [Quickstart](#quickstart)
 - [API](#api)
-- [Metrics (production)](#metrics-production)
+- [Metrics (benchmark results)](#metrics-benchmark-results)
   - [Three-regime summary (all GPUs, all prompt sets)](#three-regime-summary-all-gpus-all-prompt-sets)
   - [Generic prompts](#generic-prompts)
   - [Code prompts](#code-prompts)
@@ -46,48 +46,58 @@ Modal across four NVIDIA GPUs (A10, A100-80GB, H100, B200).
 
 ## Executive summary
 
-**Bottom line: MTP is not a blanket speedup. Whether it pays off is a joint
-`(hardware, prompt-regime, engine)` question. Acceptance rate is fixed by the
-model; the breakeven is set by the GPU and the prompt.**
+**Bottom line: at batch=1, MTP is not a blanket speedup, and run-to-run
+variance is large enough that most per-cell ratios are not trustworthy as
+point estimates. Two things are robust across n=3 re-benching: acceptance is
+fixed by the model+prompt (not the hardware), and the vLLM engine beats the
+transformers reference path by 9-27x with or without MTP. The MTP/baseline
+ratio itself is a clean win on only a few cells; on most it straddles 1.0
+once you measure its spread.**
 
-Four load-bearing findings, in order of importance:
+All cells were re-benched at **n=3** (3 independent cold runs, constant
+gamma=4 on both engines). Numbers are mean +/- sd over the 3 runs. Four
+findings, ordered by how well they survive that spread:
 
-1. **The win regime is mid-tier datacenter GPUs on predictable prompts.**
-   The MTP/baseline throughput ratio depends jointly on hardware arithmetic
-   intensity at batch=1 and on prompt-set acceptance. Code and structured
-   prompts lift acceptance from ~35% (generic) to ~50% (code) / ~57%
-   (structured), flipping vLLM A100-80GB (0.86x -> 2.12x on code) and B200
-   (0.80x -> 1.60x on code) from MTP-regression to MTP-win. Three-regime
-   summary below.
+1. **Acceptance is a model+prompt property, not a hardware property (robust).**
+   Across 8 (engine,GPU) cells per regime, acceptance lands in a tight band:
+   generic **34.6-37.3%** (2.7 pp), code **49.8-52.6%** (2.9 pp), structured
+   **52.5-58.0%** (5.5 pp). Hardware does not move acceptance; the prompt does.
 
-2. **Acceptance is a model property, not a hardware property.** Across the
-   four GPUs (A10, A100-80GB, H100, B200), per-GPU mean acceptance lands in a
-   ~1.0-1.2 pp band per prompt set (generic ~35-36%, code ~50-51%, structured
-   ~52-57%). Hardware does not move acceptance; it only moves whether the
-   verify-pass savings beat the drafter cost.
+2. **vLLM's core engine beats the transformers reference path 9-27x, MTP on or
+   off (robust).** vLLM mtp / transformers mtp ranges from 8.9x (B200 generic)
+   to 26.8x (A100-80GB structured) across every cell. PagedAttention +
+   FlashAttention + continuous batching is the dominant value prop; MTP is a
+   secondary lever.
 
-3. **vLLM's core engine beats the transformers reference path 5-11x even with
-   MTP off on both sides.** PagedAttention + FlashAttention + continuous
-   batching is the dominant value prop; MTP is a secondary lever layered on
-   top. This is engine, not spec-decode.
+3. **MTP is a clean win only on a few cells; most straddle 1.0 (the n=3
+   correction).** Of 12 vLLM GPU x regime cells, only **4** keep their entire
+   3-run range above 1.0: A10 (all three regimes) and A100-80GB code. The other
+   8 have 3-run ranges that cross 1.0, so their mean is not distinguishable from
+   breakeven at n=3. The n=1 sweep's crisp per-cell wins (e.g. "A100 code
+   2.19x", "H100 structured 0.98x") were single draws from wide distributions.
 
-4. **The fast extreme loses.** H100 on structured prompts ties at 0.98x:
-   per-decode time is already so short that the drafter forward consumes more
-   than the acceptance lift saves. The intersection of fast hardware and fast
-   software (vLLM) closes the MTP-win window. MTP wins in the middle.
+4. **The one durable MTP-win regime is the A10 (sm_86, mid-tier).** A10 is the
+   only GPU whose vLLM ratio stays above 1.0 in all three regimes
+   (generic 1.38x, code 2.06x, structured 1.79x): its slower per-decode step
+   leaves the most slack for the drafter to hide in. On the faster datacenter
+   GPUs the drafter cost and the acceptance lift roughly cancel, and cold-cache
+   variance then dominates the sign of the ratio.
 
-### Headline: three-regime MTP/baseline ratio (vLLM, constant gamma=4)
+### Headline: three-regime MTP/baseline ratio (vLLM, constant gamma=4, n=3)
+
+Mean +/- sd over 3 cold runs. "(crosses 1.0)" = the 3-run range spans both
+sides of breakeven, i.e. inconclusive at n=3.
 
 | GPU | generic | code | structured |
 |-----|--------:|-----:|-----------:|
-| A10       | 1.58x | 1.49x | **2.01x** |
-| A100-80GB | 1.21x | **2.19x** | 2.09x |
-| B200      | 0.99x | 1.68x | 1.34x |
-| H100      | 1.37x | 1.25x | 0.98x |
+| A10       | **1.38x +/- 0.06** | **2.06x +/- 0.41** | **1.79x +/- 0.29** |
+| A100-80GB | 1.06x +/- 0.14 (crosses 1.0) | **1.53x +/- 0.25** | 1.07x +/- 0.07 (crosses 1.0) |
+| B200      | 1.41x +/- 0.42 (crosses 1.0) | 1.18x +/- 0.29 (crosses 1.0) | 1.22x +/- 0.37 (crosses 1.0) |
+| H100      | 1.05x +/- 0.27 (crosses 1.0) | 1.28x +/- 0.43 (crosses 1.0) | 1.37x +/- 0.59 (crosses 1.0) |
 
-Full provenance and the transformers-engine companion table are in
-[Three-regime summary](#three-regime-summary-all-gpus-all-prompt-sets). Every
-cell is n=1; see [Methodology and caveats](#methodology-and-caveats).
+Bold = 3-run range stays entirely above 1.0 (robust MTP win). Full transformers
+companion table and provenance in
+[Three-regime summary](#three-regime-summary-all-gpus-all-prompt-sets).
 
 ## Glossary
 
@@ -415,15 +425,19 @@ drop them entirely.
 
 ```mermaid
 graph LR
-    Client -->|HTTPS X-API-Key| ModalEndpoint[Modal HTTPS endpoint]
-    ModalEndpoint -->|HTTP| Server[FastAPI MTP server :8000]
-    Server -->|target.generate&#40;assistant_model=...&#41;| Engine[Transformers MTP engine]
-    Engine --> Target[gemma-4-E2B-it]
-    Engine --> Drafter[gemma-4-E2B-it-assistant]
-    Bench[bench/load_runner.py] -->|measure| Server
-    Bench --> NVML[(nvidia-ml-py)]
-    Bench --> Results[(metrics/runs/)]
+    Deploy[deploy scripts] -->|modal deploy| Server[Server GPU<br/>transformers or vLLM]
+    Deploy -->|modal run| Bench[Bench GPU<br/>load_runner + NVML]
+    Bench -->|HTTPS .modal.run| Server
+    Bench --> Vol[(bench-results volume)]
+    Vol -->|modal volume get| Results[(metrics/runs/)]
 ```
+
+Two same-type GPU containers: the server GPU runs inference; the bench GPU
+runs `load_runner` and only NVML-probes its own GPU for the MFU/bandwidth math
+(it does no inference, `deploy/modal/modal_app.py:194`). The deploy scripts
+(`run_const.sh`, `run_ab.sh`, `vllm_run_ab.sh`) deploy a per-GPU app, warm it,
+launch `bench_run` on a matching Modal GPU, then pull the run from the
+`mtp-bench-results` volume into `metrics/runs/`.
 
 ## Components
 
@@ -579,7 +593,7 @@ curl https://<random>.modal.run/v1/chat/completions \
 The `usage` block in the response includes a `speculative_decoding` field
 with `accepted_tokens`, `proposed_tokens`, and `acceptance_rate`.
 
-## Metrics (production)
+## Metrics (benchmark results)
 
 - **Prometheus**: `GET /metrics`
   - `mtp_request_latency_seconds` histogram
@@ -603,8 +617,10 @@ For each prompt set, four comparisons per GPU:
 - **(d) vllm baseline vs transformers baseline** , engine gap with MTP off
 
 GPU compute/bandwidth specs are in [Hardware (verified)](#hardware-verified).
-Cold-start (idx=0) tax, contamination fixes, and the n=1 caveat are in
-[Methodology and caveats](#methodology-and-caveats). Every cell is n=1.
+Cold-start (idx=0) tax, n=3 spread, and contamination fixes are in
+[Methodology and caveats](#methodology-and-caveats). Headline/ratio cells are
+**n=3** (mean +/- sd); the per-prompt idx-level detail tables below are n=1
+single-run captures, labelled where they appear.
 
 For external context, Google's published Gemma 4 MTP speedups
 ([blog post](https://blog.google/innovation-and-ai/technology/developers-tools/multi-token-prediction-gemma-4/),
@@ -627,41 +643,43 @@ evaluated, not a uniform floor.
 ### Three-regime summary (all GPUs, all prompt sets)
 
 The single cross-cutting answer table. MTP/baseline warm-tps ratio at
-constant gamma=4, drop-idx=0 (warm) tokens / drop-idx=0 wall, both legs the
-same.
+constant gamma=4, drop-idx=0 (warm), **n=3** (mean +/- sd over 3 cold runs,
+ratio paired per run-index).
 
 **vLLM:**
 
 | GPU | generic | code | structured |
 |-----|--------:|-----:|-----------:|
-| A10       | 1.58x | 1.49x | **2.01x** |
-| A100-80GB | 1.21x | **2.19x** | 2.09x |
-| B200      | 0.99x | 1.68x | 1.34x |
-| H100      | 1.37x | 1.25x | 0.98x |
+| A10       | **1.38x +/- 0.06** | **2.06x +/- 0.41** | **1.79x +/- 0.29** |
+| A100-80GB | 1.06x +/- 0.14 (crosses 1.0) | **1.53x +/- 0.25** | 1.07x +/- 0.07 (crosses 1.0) |
+| B200      | 1.41x +/- 0.42 (crosses 1.0) | 1.18x +/- 0.29 (crosses 1.0) | 1.22x +/- 0.37 (crosses 1.0) |
+| H100      | 1.05x +/- 0.27 (crosses 1.0) | 1.28x +/- 0.43 (crosses 1.0) | 1.37x +/- 0.59 (crosses 1.0) |
 
 **Transformers reference path:**
 
 | GPU | generic | code | structured |
 |-----|--------:|-----:|-----------:|
-| A10       | 0.70x | 0.99x | 1.46x |
-| A100-80GB | 0.80x | 1.36x | 1.05x |
-| B200      | 0.95x | 1.08x | 1.00x |
-| H100      | 0.96x | 1.05x | 1.27x |
+| A10       | 0.78x +/- 0.08 | 0.90x +/- 0.07 (crosses 1.0) | **1.16x +/- 0.11** |
+| A100-80GB | 0.93x +/- 0.26 (crosses 1.0) | 1.01x +/- 0.19 (crosses 1.0) | 0.97x +/- 0.12 (crosses 1.0) |
+| B200      | 1.24x +/- 0.23 (crosses 1.0) | 1.20x +/- 0.30 (crosses 1.0) | **1.40x +/- 0.26** |
+| H100      | 0.85x +/- 0.24 (crosses 1.0) | 0.83x +/- 0.10 | 1.04x +/- 0.01 |
 
-Provenance: A10 + A100-80GB + B200 generic rows divide constant `_c1` mtp by
-the 2026-05-31 re-bench generic baseline
-(`baseline_n0_{a10,a10080gb,b200}_c1`), since the May-28 generic baselines
-were contaminated by the stale-warm-container bug (see
-[Methodology and caveats](#methodology-and-caveats)). H100 generic uses
-`baseline_n0_h100_c1_v2`; the v1 cell is a slot-anomaly outlier and was not
-used.
+Bold = 3-run range entirely on one side of 1.0 (robust). "(crosses 1.0)" =
+the 3 runs straddle breakeven; inconclusive.
 
-**Reading the table:** no regime is universally MTP-positive across all
-(engine, GPU) cells. The win regime is mid-tier datacenter GPUs (A10,
-A100-80GB) on predictable prompts (code, structured); the loss regime is the
-fast extreme (H100 vLLM on high-acceptance structured prompts, where
-per-decode time is already short enough that the drafter forward costs more
-than the acceptance lift saves).
+Provenance: the 2026-06-04 n=3 constant-gamma=4 re-bench (`*_c1_r{1,2,3}` dirs,
+aggregated by `bench/summarize_n3.py`); each ratio divides mtp warm-tps by
+baseline warm-tps **paired by run index**, then takes the mean and sd of the 3
+paired ratios. Raw: `metrics/n3_aggregate.json`.
+
+**Reading the table:** the only robustly MTP-positive cells are A10 across all
+three regimes (vLLM) plus A10/B200 structured (transformers) and A100-80GB code
+(vLLM). Every other cell's 3-run range crosses 1.0, so at n=3 it is
+indistinguishable from breakeven. The earlier n=1 "win/loss" verdicts on those
+cells (H100 structured 0.98x, A100 code 2.19x, B200 generic 0.99x) sat inside
+spreads of +/-0.2 to +/-0.6 and do not survive repetition. The robust signal is
+not which cell wins; it is that acceptance is prompt-fixed and the vLLM engine
+dominates the transformers path 9-27x.
 
 ### Generic prompts
 
@@ -869,6 +887,12 @@ acceptance weight to push mid-tier datacenter GPUs across breakeven. (The
 transformers A100 +0.51 and B200 -0.36 shifts include suspect single-sample
 cells; see [Methodology and caveats](#methodology-and-caveats).)
 
+> **n=3 correction.** This flip table is n=1. At n=3 only the **vLLM A100-80GB
+> code** flip survives as a robust win (1.53x +/- 0.25, range [1.25-1.86]). The
+> **vLLM B200 code** "flip" does not: n=3 is 1.18x +/- 0.29 (range [0.91-1.59]),
+> crossing 1.0. The directional story (code acceptance lifts mid-tier GPUs) is
+> sound; the B200 magnitude was a single-sample over-read.
+
 Per-GPU detail (warm, c=1, prompt_set=code):
 
 | GPU | Run | wall(s) | tot_tok | TTFT p50 (ms) | e2e p50 (ms) | acceptance | source |
@@ -958,57 +982,79 @@ structured warm tps, idx=0 cold cohort excluded).**
 
 | GPU | (a) tx_const | tx_baseline | (a) tx mtp/baseline | (b) vllm_mtp | vllm_baseline | (b) vllm mtp/baseline | tx accept | vllm accept |
 |-----|---------:|------------:|----------------:|---------:|--------------:|------------------:|----------:|------------:|
-| A10       | 7.80  | 5.36  | **1.46x** | 136.12 | 67.85  | **2.01x** | 55.3% | 57.8%  |
-| A100-80GB | 6.31  | 6.00  | 1.05x     | 300.61 | 143.96 | **2.09x** | 54.7% | 57.0%  |
-| B200      | 15.11 | 15.06 | 1.00x     | 217.79 | 162.17 | **1.34x** | 52.5% | 57.0%  |
-| H100      | 10.79 | 8.51  | 1.27x     | 136.25 | 139.54 | 0.98x     | 52.8% | 57.1%  |
+| A10       | 7.22  | 6.28  | **1.16x +/- 0.11** | 111.55 | 64.15  | **1.79x +/- 0.29** | 55.3% | 57.1%  |
+| A100-80GB | 5.83  | 6.11  | 0.97x +/- 0.12 | 156.37 | 147.27 | 1.07x +/- 0.07 | 54.7% | 58.0%  |
+| B200      | 11.65 | 8.32  | **1.40x +/- 0.26** | 182.74 | 157.66 | 1.22x +/- 0.37 | 52.5% | 57.0%  |
+| H100      | 9.32  | 8.98  | 1.04x +/- 0.01 | 211.05 | 156.56 | 1.37x +/- 0.59 | 52.8% | 57.2%  |
 
-Throughput is per-request decode tokens/sec averaged over warm requests (idx
-1..15, excluding the cold idx=0). All 4 baseline cells have
-`total_proposed_tokens: 0` confirmed in `result.json`.
+tps columns are the mean of 3 warm runs (idx 1..15, cold idx=0 excluded);
+ratio columns are the mean +/- sd of the 3 paired per-run ratios. Bold = 3-run
+range entirely on one side of 1.0. The unbolded vLLM cells (A100 1.07, B200
+1.22, H100 1.37) all have ranges crossing 1.0 ([0.97-1.12], [0.77-1.67],
+[0.72-2.14]).
 
-**Findings:**
+**Findings (n=3):**
 
-1. **Structured lifts vLLM acceptance to 57%** (A100-80GB, H100), up from
-   ~35% generic and ~52% code. The drafter's argmax matches the target's
-   argmax most often when output is template-driven.
-2. **A10 + structured is the strongest MTP win on vLLM (2.01x).** A100-80GB
-   lands ~2x on both code (2.19x) and structured (2.09x): mid-tier datacenter
-   GPUs at batch=1 are the regime where MTP pays off most.
-3. **H100 + structured is breakeven (0.98x), opposite of A10.** Highest
-   bandwidth + highest acceptance = MTP regression. H100 baseline per-decode
-   is ~7.2 ms (139.54 warm tps), so the drafter forward + verify overhead
-   consumes more than the acceptance lift saves. Fast hardware + fast software
-   closes the MTP-win window.
-4. **Transformers structured win = 1.46x A10 / 1.27x H100, ties on
-   A100/B200.** The eager reference path is slow enough that the drafter cost
-   amortizes well where decode is slowest (A10) and on H100; A100/B200 with
-   higher per-step throughput match the savings.
+1. **Structured lifts vLLM acceptance to 57-58% (robust).** Up from ~35-37%
+   generic and ~50-52% code, in a 5.5 pp band across all four GPUs. Survives
+   n=3 cleanly; the load-bearing structured result.
+2. **A10 + structured is the only robust structured vLLM win (1.79x +/- 0.29,
+   range [1.42-2.13]).** The n=1 "A10 2.01x / A100 2.09x" pair does not hold
+   symmetrically: A100-80GB structured is 1.07x +/- 0.07 (touches 0.97), i.e.
+   breakeven, not a 2x win. The 2.09x was a single high draw.
+3. **H100 + structured is NOT the n=1 breakeven, but it is inconclusive, not a
+   win.** The prior 0.98x is refuted (n=3 mean 1.37x), but the three runs are
+   [2.14, 1.25, 0.72] (sd 0.59), the widest spread in the matrix. Run-to-run
+   cold-cache variance swamps the MTP effect: a single draw can land from 2x
+   win to 0.7x regression. The "fastest baseline closes the window" rationale
+   rested on one unlucky mtp sample (old 136.25 tok/s, tying A10); at n=3 the
+   H100 mtp mean is 211 tok/s. Do not cite H100 structured as breakeven or win.
+4. **Transformers structured: only A10 (1.16x) and B200 (1.40x) hold; A100 and
+   H100 are breakeven.** A10 1.16x +/- 0.11 and B200 1.40x +/- 0.26 stay above
+   1.0; A100 (0.97x +/- 0.12) and H100 (1.04x +/- 0.01) sit at breakeven. The
+   n=1 "1.46x A10 / 1.27x H100" were high draws.
 
-**(c) vllm mtp vs transformers mtp (structured).** Computable from the
-headline: vllm_mtp / tx_const = 136.12/7.80 = **17.5x** (A10), 300.61/6.31 =
-**47.6x** (A100-80GB), 217.79/15.11 = **14.4x** (B200), 136.25/10.79 =
-**12.6x** (H100). **(d) vllm baseline vs transformers baseline:** 67.85/5.36
-= **12.7x** (A10), 143.96/6.00 = **24.0x** (A100-80GB), 162.17/15.06 =
-**10.8x** (B200), 139.54/8.51 = **16.4x** (H100).
+**(c) vllm mtp vs transformers mtp (structured, n=3 means).** vllm_mtp /
+tx_const = 111.55/7.22 = **15.5x** (A10), 156.37/5.83 = **26.8x** (A100-80GB),
+182.74/11.65 = **15.7x** (B200), 211.05/9.32 = **22.6x** (H100). **(d) vllm
+baseline vs transformers baseline:** 64.15/6.28 = **10.2x** (A10), 147.27/6.11
+= **24.1x** (A100-80GB), 157.66/8.32 = **19.0x** (B200), 156.56/8.98 =
+**17.4x** (H100). The engine gap (10-27x, MTP on or off) is the robust
+structured result.
 
-**Documented holes (structured).** Unlike generic and code, the structured
-sweep captured only the headline matrix. Missing for structured: per-GPU
-latency/TPOT/MFU/MBU detail, per-prompt acceptance, engine-vs-engine
-per-prompt, and per-prompt e2e latency tables. vLLM structured per-prompt
-acceptance is also unavailable (same `/metrics`-only limitation as every
-regime). These are next-session re-bench items.
+**Documented holes (structured).** The n=3 sweep captured per-cell warm-tps,
+acceptance, and the paired ratio, but not per-prompt (idx=0..7) breakdowns for
+structured: per-GPU latency/TPOT/MFU/MBU detail, per-prompt acceptance,
+engine-vs-engine per-prompt, and per-prompt e2e latency are not tabulated.
+vLLM per-prompt acceptance is unavailable in every regime (process-cumulative
+`/metrics` only).
 
 ## Methodology and caveats
 
 Cross-cutting methodology and known data-quality issues, referenced by the
 per-regime sections above so result tables stay clean.
 
-**Every cell is n=1.** No regime/GPU/engine cell was repeated. Findings that
-survive the noise envelope (the two vLLM code flips, the engine-portable
-5-11x gap, the acceptance bands) are called out as such; near-breakeven cells
-(0.98x, 1.00x, 1.05x) and the suspect single-sample throughput cells below
-should be treated as preliminary until re-benched at n=3.
+**All cells are n=3.** On 2026-06-04 every cell (4 GPUs x 3 regimes x
+{transformers,vLLM} x {mtp,baseline}) was re-benched as **3 independent cold
+runs** at constant gamma=4, via `deploy/modal/run_n3.sh` (labels
+`*_c1_r{1,2,3}`), aggregated by `bench/summarize_n3.py` into mean +/- sd and a
+paired-per-run ratio. 144/144 runs succeeded, 0 failures.
+
+**What n=3 changed.** Run-to-run warm-throughput spread is large (typically
+10-40% of the mean), dominated by cold-cache / cold-kernel variance on the
+serverless containers. As a result **most per-cell MTP/baseline ratios straddle
+1.0 across their 3 runs** and are inconclusive: of 24 ratio cells (12 per
+engine), only 6 keep their full 3-run range on one side of 1.0 (vLLM A10 x3,
+vLLM A100 code, transformers A10 structured, transformers B200 structured). The
+prior n=1 verdicts (H100 structured 0.98x, A100 code 2.19x/2.09x, B200 generic
+0.99x) were single draws from these wide distributions and do not survive
+repetition. Two findings DO survive cleanly: acceptance is prompt-fixed
+(generic 34.6-37.3%, code 49.8-52.6%, structured 52.5-58.0%), and the vLLM
+engine beats the transformers path 9-27x with MTP on or off. Report cells as
+mean +/- sd; treat "(crosses 1.0)" cells as breakeven-indistinguishable. Raw
+aggregate: `metrics/n3_aggregate.json`. The per-prompt (idx=0..7) detail tables
+in the generic/code subsections are the original n=1 single-run captures, kept
+for per-prompt texture and labelled there.
 
 **Warm-only and cold-start tax (idx=0 outlier).** Each run warms three short
 requests before measurement so cold-start container init is not in the wall
@@ -1078,15 +1124,20 @@ code-prompt runs) are labeled `tx_mtp_const_<gpu>_c1` from when the helper
 script wrote `tx_*`; same data, renamed in `deploy/modal/run_const.sh` for
 future runs. Existing artifact paths are not rewritten.
 
-**Suspect single-sample cells (re-bench at n=3).**
+**Formerly-suspect single-sample cells (resolved by the n=3 re-bench).** Both
+n=1-flagged cells were single-sample artifacts:
 
-- vLLM A100-80GB 2.37x code/generic mtp throughput (98 -> 232 tok/s): a 17 pp
-  acceptance lift produces at most ~1.4x intrinsic gain at constant N=4; the
-  remainder is plausibly run-to-run baseline + cold-cache variance.
-- Transformers B200 mtp (1.43x generic / 1.07x code) is the only ratio moving
-  the wrong direction; the 1.43x generic figure was flagged anomalous when
-  first measured. The 1.07x code value is more consistent with the reference
-  path's expected batch=1 behavior on a high-bandwidth GPU.
+- vLLM A100-80GB code: n=1 reported 2.37x. At n=3 the code ratio is **1.53x
+  +/- 0.25** (range [1.25-1.86]) and generic is 1.06x +/- 0.14. The 2.37x was
+  a high mtp draw against a low baseline draw; true code gain ~1.5x.
+- Transformers B200: n=1 reported 1.43x generic / 1.07x code. At n=3, generic
+  is **1.24x +/- 0.23** (range [0.91-1.41]) and code is 1.20x +/- 0.30 (range
+  [0.98-1.63]); both straddle or sit just above 1.0. The 1.43x anomaly shrank
+  toward breakeven, as predicted.
+
+This pattern is general: 18 of 24 ratio cells have 3-run ranges crossing 1.0
+(see [Three-regime summary](#three-regime-summary-all-gpus-all-prompt-sets)).
+At batch=1 on serverless GPUs, single-sample ratios near 1.0 are not reliable.
 
 **B200 utilization constant.** `bench/gpu_probe.py::_ARCH_TABLE` for sm_100
 uses 8192 FP16 ops/cycle/SM (~2382 TFLOPS peak), an approximate Blackwell
