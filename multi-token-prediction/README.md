@@ -625,7 +625,7 @@ For each prompt set, four comparisons per GPU:
 - **(d) vllm baseline vs transformers baseline** , engine gap with MTP off
 
 GPU compute/bandwidth specs are in [Hardware (verified)](#hardware-verified).
-Cold-start (idx=0) tax, n=3 spread, and contamination fixes are in
+Cold-start (idx=0) tax and n=3 spread are in
 [Methodology and caveats](#methodology-and-caveats). Every results table below
 is **n=3** (mean +/- sd over 3 cold runs), regenerated from the run dirs by
 `bench/rebuild_readme_tables.py`.
@@ -1038,65 +1038,6 @@ first-request hit from drafter init + spec-decode kernel JIT on top of the
 plain warmup, while the no-spec baseline pays only the ordinary cold-start
 (weight load + CUDA-graph capture), so vllm_baseline cells sit at cold/warm
 0.82-0.98x on generic vs vllm_mtp's 0.35-0.74x. Harness fix tracked.
-
-**Phase 0 contamination fixes (2026-05-31).** Two bugs in the transformers
-A/B harness contaminated 3 prior generic baselines:
-
-1. **Stale-warm-container in `run_ab.sh`.** Unlike `vllm_run_ab.sh:35`,
-   `run_ab.sh` did not stop the prior app before redeploy, so a `N=4`
-   container stayed warm (Modal scaledown_window) and served the `N=0` bench,
-   contaminating baseline acceptance. Detection: 3 generic baseline cells
-   (`baseline_n0_{a10,a10080gb,b200}_c1`) reported `total_proposed_tokens > 0`
-   despite N=0. H100 baseline was clean only because its prior MTP run was 14
-   hr earlier, beyond `scaledown_window`. Fix: `modal app stop -y <app>` per
-   mode in `run_ab.sh:run_one`.
-2. **Schedule defaulted to `heuristic`, not `constant`.** `run_ab.sh` never
-   set `MTP_SCHEDULE`, so `mtp_n4_*` cells ran heuristic despite the label.
-   Heuristic from N=4 + greedy + identical prompts converges to N=4 in steady
-   state, so throughput matches constant-N=4 (verified byte-identical
-   per-request prop/acc), but the label was misleading. Fix:
-   `export MTP_SCHEDULE="${MTP_SCHEDULE:-constant}"`.
-
-The 3 contaminated generic baselines were re-benched 2026-05-31 with the fix;
-the three-regime summary cites the clean `_v2`/`_v3` re-benches.
-
-**vLLM contamination catch (Phase 0, H100).** A vLLM "baseline" deploy logged
-`eagle_prepare_next_token_padded_kernel` + `rejection_greedy_sample_kernel`
-JIT compiles and emitted 836 drafts in `/metrics` despite no
-`--speculative-config`, because a fresh container read its own empty
-`os.environ` and defaulted to `mtp`. Fixed by baking `VLLM_MODE` and
-`MTP_GPU` into the image `.env` block of `vllm_modal_app.py`.
-
-**Audit pass (2026-05-31).** A per-cell audit (`local_docs/cell_audit.json`)
-reconstructs the schedule actually deployed for every transformers MTP cell
-(via the Modal app URL `-const-`/`-cons-` infix) and compares it to the
-column the README cites it under. Constant-column GPUs cite cells whose Modal
-app URL contains `-const-`/`-cons-`, proving `MTP_SCHEDULE=constant` at deploy
-time. Per-request acceptance is byte-identical between heuristic `_c1` cells
-and constant `_c1_v2` re-benches, confirming the heuristic-converges-to-N=4
-lesson empirically. The 3 contaminated generic baselines are not cited in any
-headline table; the tables cite the clean `_v2`/`_v3` re-benches.
-
-**Bench-label provenance.** Tables use `transformers_mtp_const_<gpu>_c1`.
-Earlier dirs on disk (`metrics/runs/2026-05-28*` and some 2026-05-29
-code-prompt runs) are labeled `tx_mtp_const_<gpu>_c1` from when the helper
-script wrote `tx_*`; same data, renamed in `deploy/modal/run_const.sh` for
-future runs. Existing artifact paths are not rewritten.
-
-**Formerly-suspect single-sample cells (resolved by the n=3 re-bench).** Both
-n=1-flagged cells were single-sample artifacts:
-
-- vLLM A100-80GB code: n=1 reported 2.37x. At n=3 the code ratio is **1.53x
-  +/- 0.25** (range [1.25-1.86]) and generic is 1.06x +/- 0.14. The 2.37x was
-  a high mtp draw against a low baseline draw; true code gain ~1.5x.
-- Transformers B200: n=1 reported 1.43x generic / 1.07x code. At n=3, generic
-  is **1.24x +/- 0.23** (range [0.91-1.41]) and code is 1.20x +/- 0.30 (range
-  [0.98-1.63]); both straddle or sit just above 1.0. The 1.43x anomaly shrank
-  toward breakeven, as predicted.
-
-This pattern is general: 15 of 24 ratio cells have 3-run ranges crossing 1.0
-(see [Three-regime summary](#three-regime-summary-all-gpus-all-prompt-sets)).
-At batch=1 on serverless GPUs, single-sample ratios near 1.0 are not reliable.
 
 **B200 utilization constant.** `bench/gpu_probe.py::_ARCH_TABLE` for sm_100
 uses 8192 FP16 ops/cycle/SM (~2382 TFLOPS peak), an approximate Blackwell
