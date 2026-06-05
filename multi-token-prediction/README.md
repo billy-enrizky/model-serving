@@ -71,11 +71,12 @@ findings, ordered by how well they survive that spread:
 
 3. **MTP is a clean win only on a few cells; most straddle 1.0 (the n=3
    correction).** Of 12 vLLM GPU x regime cells, only **4** keep their entire
-   3-run range above 1.0: A10 (all three regimes) and A100-80GB code. The other
-   8 have 3-run ranges that cross 1.0, so their mean is not distinguishable from
-   breakeven at n=3. The robust signal is not which cell wins; it is that
-   acceptance is prompt-fixed and the vLLM engine dominates the transformers
-   path 9-27x regardless of MTP.
+   3-run range above 1.0: A10 (all three regimes) and A100-80GB code. Across
+   both engines, **7 of 24** cells stay entirely above 1.0 (4 vLLM + 3
+   transformers: A10/B200/H100 structured); the other 17 cross 1.0 or sit
+   below, so their mean is not distinguishable from breakeven at n=3. The
+   robust signal is not which cell wins; it is that acceptance is prompt-fixed
+   and the vLLM engine dominates the transformers path 9-27x regardless of MTP.
 
 4. **The one durable MTP-win regime is the A10 (sm_86, mid-tier).** A10 is the
    only GPU whose vLLM ratio stays above 1.0 in all three regimes
