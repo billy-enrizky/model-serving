@@ -12,6 +12,9 @@ self-contained Modal app, A/B sweep scripts, and result artifacts.
   structured). Headline result: MTP/baseline ratio is **regime-dependent**:
   it depends on `(engine, GPU, prompt-set)`.
 
+https://github.com/user-attachments/assets/4c07e70d-1295-435e-81df-cea1e6cd74eb
+
+
 Future methods (e.g. `dflash/`) follow the same shape: subdir +
 Modal app + A/B + measured artifacts.
 
