@@ -830,9 +830,14 @@ n=3 warm tok/s.**
 | B200 | 17.87 | 16.57 | 0.93x | 143.52 | 167.52 | 1.17x |
 | H100 | 16.12 | 16.02 | 0.99x | 164.96 | 157.22 | 0.95x |
 
-The (d) gap on code: vllm_baseline / tx_baseline = 66.62/10.85 = **6.1x**
-(A10), 133.88/8.55 = **15.7x** (A100-80GB), 167.52/16.57 = **10.1x** (B200),
-157.22/16.02 = **9.8x** (H100). Pure engine, no spec-decode involved.
+The (d) engine gap on code (vllm_baseline / tx_baseline, pure engine, no spec-decode):
+
+| GPU | vllm_baseline code (tok/s) | tx_baseline code (tok/s) | vllm / tx |
+|-----------|---------------------------:|-------------------------:|----------:|
+| A10 | 66.62 | 10.85 | **6.1x** |
+| A100-80GB | 133.88 | 8.55 | **15.7x** |
+| B200 | 167.52 | 16.57 | **10.1x** |
+| H100 | 157.22 | 16.02 | **9.8x** |
 
 **(a)+(b) MTP/baseline ratio, code vs generic , the flip table (n=3 mean +/-
 sd of paired per-run ratios).**
@@ -943,13 +948,25 @@ range entirely on one side of 1.0. The unbolded vLLM cells (A100 1.07, B200
    H100 are breakeven.** A10 1.16x +/- 0.11 and B200 1.40x +/- 0.26 stay above
    1.0; A100 (0.97x +/- 0.12) and H100 (1.04x +/- 0.01) sit at breakeven.
 
-**(c) vllm mtp vs transformers mtp (structured, n=3 means).** vllm_mtp /
-tx_mtp = 111.55/7.22 = **15.5x** (A10), 156.37/5.83 = **26.8x** (A100-80GB),
-182.74/11.65 = **15.7x** (B200), 211.05/9.32 = **22.6x** (H100). **(d) vllm
-baseline vs transformers baseline:** 64.15/6.28 = **10.2x** (A10), 147.27/6.11
-= **24.1x** (A100-80GB), 157.66/8.32 = **18.9x** (B200), 156.56/8.98 =
-**17.4x** (H100). The engine gap (10-27x, MTP on or off) is the robust
-structured result.
+**(c) vllm mtp vs transformers mtp (structured, n=3 means).** Engine gap with MTP on:
+
+| GPU | vllm_mtp (tok/s) | tx_mtp (tok/s) | vllm / tx |
+|-----------|-----------------:|---------------:|----------:|
+| A10 | 111.55 | 7.22 | **15.5x** |
+| A100-80GB | 156.37 | 5.83 | **26.8x** |
+| B200 | 182.74 | 11.65 | **15.7x** |
+| H100 | 211.05 | 9.32 | **22.6x** |
+
+**(d) vllm baseline vs transformers baseline (structured, n=3 means).** Engine gap with MTP off:
+
+| GPU | vllm_base (tok/s) | tx_base (tok/s) | vllm / tx |
+|-----------|------------------:|----------------:|----------:|
+| A10 | 64.15 | 6.28 | **10.2x** |
+| A100-80GB | 147.27 | 6.11 | **24.1x** |
+| B200 | 157.66 | 8.32 | **18.9x** |
+| H100 | 156.56 | 8.98 | **17.4x** |
+
+The engine gap (10-27x, MTP on or off) is the robust structured result.
 
 **(a) per-prompt acceptance (transformers_mtp, structured), n=3 mean.** idx 0-7:
 JSON object, JSON book array, K8s YAML, HTTP-200 JSON, user-record JSON,
