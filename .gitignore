@@ -161,3 +161,6 @@ terraform.rc
 # --- Misc ---
 *.DS_Store
 desktop.ini
+
+# Local bench artifacts
+multi-token-prediction/metrics/
